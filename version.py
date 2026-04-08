@@ -8,7 +8,7 @@ Version follows semantic versioning: MAJOR.MINOR.PATCH
 import sys
 from typing import Optional, Tuple
 
-WINDOWS_VERSION = "4.0.9c-public"
+WINDOWS_VERSION = "4.0.9d"
 LINUX_VERSION = "1.1.4"
 __build_date__ = None  # Set during build process
 
@@ -27,7 +27,11 @@ def _normalize_platform(platform: Optional[str] = None) -> str:
 def _split_version(version: str) -> Tuple[int, int, int]:
     """Split a semantic version string into (major, minor, patch)."""
     try:
-        major, minor, patch = (int(part) for part in version.split("."))
+        parts = version.split(".")
+        major = int(parts[0]) if len(parts) > 0 else 0
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        patch_str = parts[2] if len(parts) > 2 else "0"
+        patch = int(''.join(c for c in patch_str if c.isdigit()) or '0')
         return major, minor, patch
     except Exception:
         return 0, 0, 0

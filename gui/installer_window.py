@@ -2052,7 +2052,20 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 return False
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
             try:
-                subprocess.Popen([str(gui_exe)], cwd=str(install_dir), creationflags=creation_flags)
+                if miner_code == "BM" and os.name == 'nt':
+                    # Use PowerShell Start-Process to guarantee BM_SHARING_MODE
+                    # is inherited (cmd start / ShellExecuteEx drop process env vars
+                    # for GUI-subsystem executables).
+                    ps_cmd = (
+                        f"$env:BM_SHARING_MODE='mysterium'; "
+                        f"Start-Process '{gui_exe}' -WorkingDirectory '{install_dir}'"
+                    )
+                    subprocess.Popen(
+                        ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                        cwd=str(install_dir), creationflags=creation_flags
+                    )
+                else:
+                    subprocess.Popen([str(gui_exe)], cwd=str(install_dir), creationflags=creation_flags)
                 self._debug_log(f"GUI launch attempted via Popen: {gui_exe}")
             except Exception:
                 if os.name == 'nt':
@@ -5079,6 +5092,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     except Exception:
                         shortcut_install_path = None
 
+                # Clean up obsolete launcher.bat from prior installs
+                if miner_info.get("code") == "BM" and os.name == 'nt' and shortcut_install_path:
+                    try:
+                        _old_launcher = Path(shortcut_install_path) / "launcher.bat"
+                        if _old_launcher.exists():
+                            _old_launcher.unlink(missing_ok=True)
+                            self._debug_log(f"Removed obsolete launcher.bat from {shortcut_install_path}")
+                    except Exception:
+                        pass
+
                 shortcut_path = None
                 if options.get("create_desktop_shortcut", False) and os.name == 'nt':
                     try:
@@ -5124,6 +5147,47 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     except Exception as startup_err:
                         self.log_progress(f"[warning] Could not configure GUI autostart: {startup_err}")
                         self._debug_log(f"Startup shortcut creation failed: {startup_err}")
+
+                # ---- Auto-updater scheduled task ----
+                if os.name == 'nt':
+                    try:
+                        import shutil
+                        from pathlib import Path as _UP
+
+                        # Locate bundled updater exe
+                        if getattr(sys, 'frozen', False):
+                            updater_src = _UP(sys._MEIPASS) / 'frynetworks_updater.exe'
+                        else:
+                            updater_src = _UP(__file__).resolve().parent.parent / 'dist' / 'frynetworks_updater.exe'
+
+                        if updater_src.exists():
+                            updater_dest_dir = _UP(os.environ.get('PROGRAMDATA', 'C:\\ProgramData')) / 'FryNetworks' / 'updater'
+                            updater_dest_dir.mkdir(parents=True, exist_ok=True)
+                            updater_dest = updater_dest_dir / 'frynetworks_updater.exe'
+                            shutil.copy2(str(updater_src), str(updater_dest))
+                            self._debug_log(f"Updater exe staged to {updater_dest}")
+
+                            from version import WINDOWS_VERSION
+                            current_ver = f"v{WINDOWS_VERSION}" if not WINDOWS_VERSION.startswith("v") else WINDOWS_VERSION
+                            updater_path_escaped = str(updater_dest).replace("'", "''")
+
+                            register_cmd = f'''
+$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --current-version {current_ver}' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
+$triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+$triggerDaily = New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
+Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Limited -Force | Out-Null
+'''
+                            subprocess.run(
+                                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
+                                capture_output=True, timeout=30
+                            )
+                            self.log_progress("Auto-updater scheduled task registered")
+                            self._debug_log("Scheduled task FryNetworksUpdater registered")
+                        else:
+                            self._debug_log(f"Updater exe not found at {updater_src} — skipping task registration")
+                    except Exception as updater_err:
+                        self._debug_log(f"Auto-updater task registration failed: {updater_err}")
 
                 self.update_progress(90, "Finalizing installation...")
                 self.update_progress(100, "Installation completed successfully!")
@@ -6412,7 +6476,7 @@ foreach ($loc in $locations) {{
                 gui_exe = matching_files[0]  # Use the first match
             else:
                 raise FileNotFoundError(f"GUI executable not found: {gui_exe} (searched in {install_path})")
-        
+
         # Desktop folder
         desktop = Path.home() / "Desktop"
         if not desktop.exists():
@@ -6421,15 +6485,31 @@ foreach ($loc in $locations) {{
             if not desktop.exists():
                 desktop = Path.home() / "Desktop"
                 desktop.mkdir(parents=True, exist_ok=True)
-        
+
         shortcut_name = f"FryNetworks {miner_code} Miner.lnk"
         shortcut_path = desktop / shortcut_name
-        self._create_windows_shortcut(
-            shortcut_path=shortcut_path,
-            target_path=gui_exe,
-            working_dir=install_path,
-            description=f"FryNetworks {miner_code} Miner GUI"
-        )
+        if miner_code == "BM":
+            # BM shortcut targets powershell.exe so it can inject BM_SHARING_MODE
+            # before launching the GUI (cmd start / ShellExecuteEx drops process env).
+            ps_cmd = (
+                f"$env:BM_SHARING_MODE='mysterium'; "
+                f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
+            )
+            self._create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                working_dir=install_path,
+                description=f"FryNetworks {miner_code} Miner GUI",
+                arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
+                icon_path=str(gui_exe)
+            )
+        else:
+            self._create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=gui_exe,
+                working_dir=install_path,
+                description=f"FryNetworks {miner_code} Miner GUI"
+            )
         return shortcut_path
 
     def _create_start_menu_shortcut_for_miner(self, miner_code: str, install_path: Path, gui_version: Optional[str]) -> Path:
@@ -6453,12 +6533,26 @@ foreach ($loc in $locations) {{
         start_dir = start_base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "FryNetworks"
         start_dir.mkdir(parents=True, exist_ok=True)
         shortcut_path = start_dir / f"FryNetworks {miner_code} Miner.lnk"
-        self._create_windows_shortcut(
-            shortcut_path=shortcut_path,
-            target_path=gui_exe,
-            working_dir=install_path,
-            description=f"FryNetworks {miner_code} Miner GUI"
-        )
+        if miner_code == "BM":
+            ps_cmd = (
+                f"$env:BM_SHARING_MODE='mysterium'; "
+                f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
+            )
+            self._create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                working_dir=install_path,
+                description=f"FryNetworks {miner_code} Miner GUI",
+                arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
+                icon_path=str(gui_exe)
+            )
+        else:
+            self._create_windows_shortcut(
+                shortcut_path=shortcut_path,
+                target_path=gui_exe,
+                working_dir=install_path,
+                description=f"FryNetworks {miner_code} Miner GUI"
+            )
         return shortcut_path
 
     def _create_startup_shortcut_for_miner(self, miner_code: str, install_path: Path, gui_version: Optional[str]) -> Path:
@@ -6480,12 +6574,26 @@ foreach ($loc in $locations) {{
                 "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
             startup_dir.mkdir(parents=True, exist_ok=True)
             shortcut_path = startup_dir / f"FryNetworks {miner_code} Miner.lnk"
-            self._create_windows_shortcut(
-                shortcut_path=shortcut_path,
-                target_path=gui_exe,
-                working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI"
-            )
+            if miner_code == "BM":
+                ps_cmd = (
+                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
+                )
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI",
+                    arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
+                    icon_path=str(gui_exe)
+                )
+            else:
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=gui_exe,
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI"
+                )
             return shortcut_path
 
         if sys.platform.startswith("linux"):
@@ -6613,12 +6721,26 @@ foreach ($loc in $locations) {{
             temp_dir = Path(tempfile.gettempdir()) / "FryNetworks" / "TaskbarPins"
             temp_dir.mkdir(parents=True, exist_ok=True)
             shortcut_path = temp_dir / f"FryNetworks_{miner_code}_pin.lnk"
-            self._create_windows_shortcut(
-                shortcut_path=shortcut_path,
-                target_path=gui_exe,
-                working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI"
-            )
+            if miner_code == "BM":
+                ps_cmd = (
+                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
+                )
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI",
+                    arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
+                    icon_path=str(gui_exe)
+                )
+            else:
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=gui_exe,
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI"
+                )
             cleanup_shortcut = True
 
         shortcut_str = str(shortcut_path).replace('"', '`"')
@@ -6678,12 +6800,26 @@ if ($item -ne $null) {{
             temp_dir = Path(tempfile.gettempdir()) / "FryNetworks" / "StartPins"
             temp_dir.mkdir(parents=True, exist_ok=True)
             shortcut_path = temp_dir / f"FryNetworks_{miner_code}_startpin.lnk"
-            self._create_windows_shortcut(
-                shortcut_path=shortcut_path,
-                target_path=gui_exe,
-                working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI"
-            )
+            if miner_code == "BM":
+                ps_cmd = (
+                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
+                )
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI",
+                    arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
+                    icon_path=str(gui_exe)
+                )
+            else:
+                self._create_windows_shortcut(
+                    shortcut_path=shortcut_path,
+                    target_path=gui_exe,
+                    working_dir=install_path,
+                    description=f"FryNetworks {miner_code} Miner GUI"
+                )
             cleanup_shortcut = True
 
         shortcut_str = str(shortcut_path).replace('"', '`"')
@@ -6717,7 +6853,9 @@ if ($item -ne $null) {{
         shortcut_path: Path,
         target_path: Path,
         working_dir: Path,
-        description: str
+        description: str,
+        arguments: str = "",
+        icon_path: str = ""
     ) -> None:
         """Create a Windows shortcut (.lnk)."""
         if os.name != 'nt':
@@ -6728,14 +6866,19 @@ if ($item -ne $null) {{
         working_dir_str = str(working_dir).replace('"', '`"')
         shortcut_str = str(shortcut_path).replace('"', '`"')
         desc_str = description.replace('"', '`"')
+        args_str = arguments.replace('"', '`"').replace('$', '`$')
+        icon_str = icon_path.replace('"', '`"') if icon_path else ""
         ps_script = f"""
 $WshShell = New-Object -comObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut("{shortcut_str}")
 $Shortcut.TargetPath = "{target_str}"
+$Shortcut.Arguments = "{args_str}"
 $Shortcut.WorkingDirectory = "{working_dir_str}"
 $Shortcut.Description = "{desc_str}"
-$Shortcut.Save()
 """
+        if icon_str:
+            ps_script += f'$Shortcut.IconLocation = "{icon_str},0"\n'
+        ps_script += "$Shortcut.Save()\n"
         subprocess.run(
             ["powershell.exe", "-NoLogo", "-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
             check=True,
