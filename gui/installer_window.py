@@ -157,6 +157,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Track when an installation has completed so Finish button closes instead of reinstalling
         self._post_install_mode: bool = False
         self._last_install_ctx: Optional[Dict[str, Any]] = None
+        self._browsers_running_at_install: list = []
 
         # Track whether the progress log has been seeded for the current run (kept for safety)
         self._progress_seeded = False
@@ -5744,6 +5745,7 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                     os.path.join(Path.home(), 'OneDrive', 'Desktop'),
                     os.path.join('C:\\ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
                     os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar'),
+                    os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Internet Explorer', 'Quick Launch'),
                 ]
                 # Find Brave install path
                 brave_exe = None
@@ -5814,70 +5816,61 @@ $s.Save()
 
                 _log("Brave shortcuts configured for extension loading")
 
-                # Check if Brave is currently running — extension won't load until full restart
+                # Check which browsers are running — extensions only load on fresh launch
+                self._browsers_running_at_install = []
                 try:
-                    check_brave = subprocess.run(
-                        ['powershell', '-NoProfile', '-Command', 'if (Get-Process -Name brave -ErrorAction SilentlyContinue) { Write-Output 1 } else { Write-Output 0 }'],
-                        capture_output=True, text=True, timeout=10
-                    )
-                    if check_brave.stdout.strip() == '1':
-                        _dbg("Brave is running — extension will load after full Brave restart")
-                        _log("[warning] Brave is running — please close and reopen Brave to activate the Web Agent extension")
+                    for proc_name, display_name in [('brave', 'Brave'), ('chrome', 'Chrome'), ('msedge', 'Edge')]:
+                        check = subprocess.run(
+                            ['powershell', '-NoProfile', '-Command',
+                             f'if (Get-Process -Name {proc_name} -ErrorAction SilentlyContinue) {{ Write-Output 1 }} else {{ Write-Output 0 }}'],
+                            capture_output=True, text=True, timeout=10
+                        )
+                        if check.stdout.strip() == '1':
+                            self._browsers_running_at_install.append((proc_name, display_name))
+                            _dbg(f"{display_name} is running")
+                    if self._browsers_running_at_install:
+                        names = ', '.join(d for _, d in self._browsers_running_at_install)
+                        _log(f"[warning] {names} running — restart needed to activate Web Agent extension")
                 except Exception:
                     pass
 
             except Exception as e:
                 _dbg(f"Brave shortcut configuration failed: {e}")
 
-            # 4e. Scheduled task for Brave shortcut repair
+            # 4e. Deploy repair exe and register scheduled task
             _status("Creating extension maintenance task...")
             try:
-                repair_script_dir = Path(local_app_data) / 'Orbit'
-                repair_script_dir.mkdir(parents=True, exist_ok=True)
-                repair_script_path = repair_script_dir / 'repair_brave_shortcuts.ps1'
-                repair_script_content = f'''# FryNetworks Web Agent - Brave shortcut repair
-$extPath = "{ext_dir_str}"
-if (-not (Test-Path $extPath)) {{ exit 0 }}
-$locations = @(
-    "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs",
-    "$env:PUBLIC\\Desktop",
-    [Environment]::GetFolderPath("Desktop"),
-    (Join-Path ([Environment]::GetFolderPath("UserProfile")) "OneDrive\\Desktop"),
-    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
-    (Join-Path $env:APPDATA "Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar")
-)
-$ws = New-Object -ComObject WScript.Shell
-foreach ($loc in $locations) {{
-    if (-not (Test-Path $loc)) {{ continue }}
-    Get-ChildItem $loc -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | ForEach-Object {{
-        $shortcut = $ws.CreateShortcut($_.FullName)
-        if (($_.Name -like "*brave*" -or $shortcut.TargetPath -like "*brave*") -and $shortcut.Arguments -notlike "*--load-extension*") {{
-            if (-not $shortcut.TargetPath -and $_.Name -like "*brave*") {{
-                $shortcut.TargetPath = "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
-            }}
-            $shortcut.Arguments = ($shortcut.Arguments + " --load-extension=$extPath").Trim()
-            $shortcut.Save()
-        }}
-    }}
-}}
-'''
-                with open(repair_script_path, 'w', encoding='utf-8') as f:
-                    f.write(repair_script_content)
-                _dbg(f"Repair script written to {repair_script_path}")
+                import shutil as _shutil_repair
+                _UP = Path
+                # Locate bundled FryRepairShortcuts.exe
+                if getattr(sys, 'frozen', False):
+                    repair_exe_src = _UP(sys._MEIPASS) / 'tools' / 'FryRepairShortcuts.exe'
+                else:
+                    repair_exe_src = _UP(__file__).resolve().parent.parent / 'tools' / 'FryRepairShortcuts.exe'
 
-                script_path_escaped = str(repair_script_path).replace("'", "''")
-                register_cmd = f'''
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File '{script_path_escaped}'"
+                repair_exe_dest_dir = Path(local_app_data) / 'Orbit'
+                repair_exe_dest_dir.mkdir(parents=True, exist_ok=True)
+                repair_exe_dest = repair_exe_dest_dir / 'FryRepairShortcuts.exe'
+
+                if repair_exe_src.exists():
+                    _shutil_repair.copy2(str(repair_exe_src), str(repair_exe_dest))
+                    _dbg(f"Repair exe deployed to {repair_exe_dest}")
+
+                    exe_path_escaped = str(repair_exe_dest).replace("'", "''")
+                    register_cmd = f'''
+$action = New-ScheduledTaskAction -Execute '{exe_path_escaped}' -Argument '--ext-path "{ext_dir_str}"'
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
 $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 4) -RepetitionDuration (New-TimeSpan -Days 365)
 Register-ScheduledTask -TaskName "FryNetworks_WebAgent_BraveRepair" -Action $action -Trigger $triggerLogon,$triggerRepeat -RunLevel Limited -Force | Out-Null
 '''
-                subprocess.run(
-                    ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
-                    capture_output=True, timeout=30
-                )
-                _dbg("Scheduled task FryNetworks_WebAgent_BraveRepair registered")
-                _log("Extension maintenance task registered")
+                    subprocess.run(
+                        ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
+                        capture_output=True, timeout=30
+                    )
+                    _dbg("Scheduled task FryNetworks_WebAgent_BraveRepair registered")
+                    _log("Extension maintenance task registered")
+                else:
+                    _dbg(f"Repair exe not found at {repair_exe_src} — skipping task registration")
             except Exception as e:
                 _dbg(f"Scheduled task registration failed: {e}")
 
@@ -5957,7 +5950,10 @@ $locations = @(
     "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs",
     "$env:PUBLIC\\Desktop",
     [Environment]::GetFolderPath("Desktop"),
-    (Join-Path ([Environment]::GetFolderPath("UserProfile")) "OneDrive\\Desktop")
+    (Join-Path ([Environment]::GetFolderPath("UserProfile")) "OneDrive\\Desktop"),
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+    (Join-Path $env:APPDATA "Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar"),
+    (Join-Path $env:APPDATA "Microsoft\\Internet Explorer\\Quick Launch")
 )
 foreach ($loc in $locations) {{
     if (-not (Test-Path $loc)) {{ continue }}
@@ -5987,13 +5983,14 @@ foreach ($loc in $locations) {{
         except Exception:
             pass
 
-        # 6. Remove repair script
-        try:
-            repair_script = Path(local_app_data) / 'Orbit' / 'repair_brave_shortcuts.ps1'
-            if repair_script.exists():
-                repair_script.unlink()
-        except Exception:
-            pass
+        # 6. Remove repair exe, log, and legacy repair script
+        for fname in ['FryRepairShortcuts.exe', 'FryRepairShortcuts.log', 'repair_brave_shortcuts.ps1']:
+            try:
+                fpath = Path(local_app_data) / 'Orbit' / fname
+                if fpath.exists():
+                    fpath.unlink()
+            except Exception:
+                pass
 
         # 7. Uninstall Orbit via Squirrel
         try:
@@ -6083,6 +6080,11 @@ foreach ($loc in $locations) {{
         except Exception:
             pass
 
+        # Browser restart dialog (AEM — web agent extension needs a fresh browser launch)
+        running_browsers = getattr(self, '_browsers_running_at_install', [])
+        if running_browsers and result.get("_launch_miner_code") == "AEM":
+            self._show_browser_restart_dialog(running_browsers)
+
         # Launch GUI if requested (fresh install passes _launch_gui=True in result)
         # This runs on main thread so QTimer.singleShot works correctly
         if result.get("_launch_gui"):
@@ -6108,6 +6110,65 @@ foreach ($loc in $locations) {{
                     )
             except Exception as launch_err:
                 self._debug_log(f"GUI launch from main thread failed: {launch_err}")
+
+    def _show_browser_restart_dialog(self, running_browsers: list):
+        """Offer to restart browsers so the Web Agent extension loads immediately."""
+        names = ', '.join(display for _, display in running_browsers)
+        verb = 'is' if len(running_browsers) == 1 else 'are'
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Browser Restart Required")
+        msg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        msg.setText(f"<b>{names} {verb} currently running.</b>")
+        msg.setInformativeText(
+            "Your browser needs to be restarted for the Web Agent extension to appear.\n\n"
+            "Browser extensions installed via system policy only load on a fresh browser launch."
+        )
+        restart_btn = msg.addButton("Restart browser now", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("I'll restart it later", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(restart_btn)
+        msg.exec()
+
+        if msg.clickedButton() == restart_btn:
+            self._restart_browsers(running_browsers)
+
+    def _restart_browsers(self, browsers: list):
+        """Gracefully restart detected browsers."""
+        import subprocess, time, os
+
+        exe_paths = {
+            'brave': r'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe',
+            'chrome': r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+            'msedge': r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+        }
+
+        # Graceful close first (no /F)
+        for proc_name, display in browsers:
+            try:
+                subprocess.run(['taskkill', '/IM', f'{proc_name}.exe'], capture_output=True, timeout=5)
+                self._debug_log(f"Sent close signal to {display}")
+            except Exception:
+                pass
+
+        time.sleep(3)
+
+        # Force-kill any remaining
+        for proc_name, display in browsers:
+            try:
+                subprocess.run(['taskkill', '/F', '/IM', f'{proc_name}.exe', '/T'], capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+        time.sleep(2)
+
+        # Relaunch each browser
+        for proc_name, display in browsers:
+            exe = exe_paths.get(proc_name)
+            if exe and os.path.exists(exe):
+                try:
+                    subprocess.Popen([exe], close_fds=True)
+                    self._debug_log(f"Relaunched {display}")
+                except Exception as e:
+                    self._debug_log(f"Failed to relaunch {display}: {e}")
 
     # --- Cancellation & Rollback ---
     def _on_cancel_clicked(self):

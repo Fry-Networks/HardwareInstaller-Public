@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional, cast
 
 
-DEFAULT_REPO = "FryDevsTestingLab/HardwareInstaller"
+DEFAULT_REPO = "Fry-Foundation/HardwareInstaller-Public"
 DEFAULT_TASK_NAME = "FryNetworksUpdater"
 DEFAULT_EMBEDDED_TOKEN = os.getenv("EMBEDDED_GITHUB_TOKEN", "")
 

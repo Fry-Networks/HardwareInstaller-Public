@@ -31,6 +31,7 @@ a = Analysis(
         ('resources/embedded', 'resources/embedded'),
         ('SDK', 'SDK'),
         ('core', 'core'),
+        ('dist/frynetworks_updater.exe', '.'),
     ],
     hiddenimports=[
         'core.service_manager',
