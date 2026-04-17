@@ -242,6 +242,7 @@ try {
         --add-data "resources\embedded;resources\embedded" `
         --add-data "SDK;SDK" `
         --add-data "core;core" `
+        --add-data "dist\frynetworks_updater.exe;." `
         --name $ExeName `
         installer_main.py
     
