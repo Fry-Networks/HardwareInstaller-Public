@@ -94,10 +94,10 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_msiexec(msi_path: Path, quiet: bool, log_file: Path) -> None:
-    args = ["msiexec.exe", "/i", str(msi_path)]
+def run_installer(installer_path: Path, quiet: bool, log_file: Path) -> None:
+    args = [str(installer_path)]
     if quiet:
-        args.append("/qn")
+        args.append("--quiet")
     write_log(f"Running: {' '.join(args)}", log_file)
     subprocess.Popen(args)
 
@@ -133,9 +133,9 @@ def main() -> int:
             write_log("No update needed.", log_file)
             return 0
 
-        msi_asset = find_asset(release, ".msi")
+        msi_asset = find_asset(release, ".exe")
         if not msi_asset:
-            write_log("No MSI asset found in latest release.", log_file)
+            write_log("No installer asset found in latest release.", log_file)
             return 1
 
         msi_url = msi_asset.get("browser_download_url")
@@ -168,7 +168,7 @@ def main() -> int:
                     return 1
             write_log("Checksum verified.", log_file)
 
-        run_msiexec(dest, args.quiet, log_file)
+        run_installer(dest, args.quiet, log_file)
         write_log("Update triggered (msiexec launched).", log_file)
         return 0
     except urllib.error.HTTPError as e:
