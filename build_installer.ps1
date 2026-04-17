@@ -235,7 +235,6 @@ try {
         --hidden-import "core.key_parser" `
         --collect-submodules "core" `
         --icon "resources\frynetworks_logo.ico" `
-        --version-file "version_info.txt" `
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
