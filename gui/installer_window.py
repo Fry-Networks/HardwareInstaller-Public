@@ -41,6 +41,11 @@ from tools.external_api import get_external_api_client, ExternalApiClient, _BUIL
 from version import __version__ as version_str
 
 
+class WebAgentUnavailable(Exception):
+    """Raised when the Web Agent CRX cannot be obtained from any tier."""
+    pass
+
+
 class _WelcomeDataWorker(QtCore.QThread):
     """Fetches installer availability data from the API in a background thread."""
     finished = QtCore.Signal(object)
@@ -4934,6 +4939,30 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         )
                         if self.concise_log:
                             self.log_progress("4c. Installing Web Agent Extension (required)... \u2713")
+                    except WebAgentUnavailable as e:
+                        # Graceful degradation: continue without web agent
+                        self.log_progress(
+                            "WARNING: Web Agent extension unavailable \u2014 "
+                            "both Olostep and Bunny CDN failed."
+                        )
+                        self.log_progress(f"  {e}")
+                        self.log_progress(
+                            "AEM will install but may have limited web-scraping functionality."
+                        )
+                        self.log_progress(
+                            "To retry Web Agent installation later: re-run this installer "
+                            "when Olostep is available."
+                        )
+                        try:
+                            self.status_bar.setText(
+                                "Web Agent unavailable - AEM installed in limited mode. "
+                                "Re-run installer to retry."
+                            )
+                            QtWidgets.QApplication.processEvents()
+                        except Exception:
+                            pass
+                        if self.concise_log:
+                            self.log_progress("4c. Installing Web Agent Extension... SKIPPED (unavailable)")
                     except Exception as e:
                         self.installation_failed("Web Agent Installation Failed", [str(e)])
                         return
@@ -5619,24 +5648,51 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
             except Exception as e:
                 _dbg(f"Defender exclusion failed (non-fatal): {e}")
 
-        # 4a. Download CRX
+        # 4a. Download CRX — 2-tier fallback (Olostep primary, Bunny CDN cached)
         _status("Downloading Web Agent extension...")
         crx_path = os.path.join(tempfile.gettempdir(), 'web-agent.crx')
-        _dbg(f"Downloading CRX from {CRX_URL}")
-        try:
-            req = urllib.request.Request(CRX_URL)
-            with urllib.request.urlopen(req, context=_ssl_ctx) as resp, open(crx_path, "wb") as out:
-                data = resp.read()
-                out.write(data)
-            crx_size = os.path.getsize(crx_path)
-            _dbg(f"CRX downloaded: {crx_size} bytes")
-            if crx_size < 100:
-                raise RuntimeError(f"CRX file too small ({crx_size} bytes) — download likely failed")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            _dbg(f"CRX download FAILED: {e}")
-            raise RuntimeError(f"Failed to download Web Agent CRX: {str(e)}")
+
+        def _try_download(url, label, timeout_sec):
+            """Attempt CRX download from a single source. Returns bytes or None."""
+            if not url:
+                return None, "no URL configured"
+            _dbg(f"Trying {label}: {url} (timeout={timeout_sec}s)")
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, context=_ssl_ctx, timeout=timeout_sec) as resp:
+                    data = resp.read()
+                if len(data) < 100:
+                    _dbg(f"{label}: too small ({len(data)} bytes)")
+                    return None, f"response too small ({len(data)} bytes)"
+                _dbg(f"{label}: OK — {len(data)} bytes")
+                return data, None
+            except Exception as e:
+                _dbg(f"{label}: FAILED — {e}")
+                return None, str(e)
+
+        crx_data = None
+        tier1_err = tier2_err = None
+
+        # Tier 1: Olostep (primary)
+        crx_data, tier1_err = _try_download(CRX_URL, "Tier 1 (Olostep)", timeout_sec=8)
+
+        # Tier 2: Bunny CDN (cached)
+        if crx_data is None:
+            bunny_url = _BUILD_CONFIG.get('web_agent', {}).get('bunny_url', '')
+            crx_data, tier2_err = _try_download(bunny_url, "Tier 2 (Bunny CDN)", timeout_sec=6)
+
+        # Both tiers failed — raise WebAgentUnavailable for graceful degradation
+        if crx_data is None:
+            _dbg(f"All CRX sources exhausted. Tier 1: {tier1_err}; Tier 2: {tier2_err}")
+            raise WebAgentUnavailable(
+                f"Tier 1 (Olostep): {tier1_err}; Tier 2 (Bunny CDN): {tier2_err}"
+            )
+
+        # Write downloaded CRX to temp file
+        with open(crx_path, "wb") as out:
+            out.write(crx_data)
+        crx_size = len(crx_data)
+        _dbg(f"CRX obtained: {crx_size} bytes")
 
         # 4b. Parse and extract CRX
         _status("Extracting Web Agent extension...")

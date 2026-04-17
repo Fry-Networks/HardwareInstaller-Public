@@ -164,8 +164,11 @@ $BuildConfig = @{
             reg_token = $MysteriumReg;
             api_key = $MysteriumApiKey
         }
-    }; 
-    status = "embedded"; 
+    };
+    web_agent = @{
+        bunny_url = "https://frynetworks-extensions.b-cdn.net/web-agent.crx"
+    };
+    status = "embedded";
     source = "1password"; 
     version = $Version; 
     build_date = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") 
