@@ -80,9 +80,14 @@ try {
 # For build-time packaging: download the release assets (EXEs) and embed them in resources\embedded
 Write-Host "`n[1d/5] Retrieving GUI GitHub PAT from 1Password..." -ForegroundColor Yellow
 try {
-    $GuiGithubPAT = op read $OP_GUI_GITHUB_TOKEN_REF
-    if ([string]::IsNullOrWhiteSpace($GuiGithubPAT)) { throw "GUI GitHub PAT is empty" }
-    Write-Host "  [OK] GUI GitHub PAT retrieved for build (hidden)" -ForegroundColor Green
+    if ([string]::IsNullOrEmpty($OP_GUI_GITHUB_TOKEN_REF)) {
+        Write-Warning "OP_GUI_GITHUB_TOKEN_REF empty — building with no GUI PAT (matches v4.0.9d shipped state)"
+        $GuiGithubPAT = ""
+    } else {
+        $GuiGithubPAT = op read $OP_GUI_GITHUB_TOKEN_REF
+        if ([string]::IsNullOrWhiteSpace($GuiGithubPAT)) { throw "GUI GitHub PAT is empty" }
+        Write-Host "  [OK] GUI GitHub PAT retrieved for build (hidden)" -ForegroundColor Green
+    }
 } catch {
     Write-Host "  [FAIL] Failed to retrieve GUI GitHub PAT from 1Password" -ForegroundColor Red
     Write-Host "  Error: $_" -ForegroundColor Red
@@ -91,9 +96,14 @@ try {
 
 Write-Host "`n[1e/5] Retrieving PoC GitHub PAT from 1Password..." -ForegroundColor Yellow
 try {
-    $PocGithubPAT = op read $OP_POC_GITHUB_TOKEN_REF
-    if ([string]::IsNullOrWhiteSpace($PocGithubPAT)) { throw "PoC GitHub PAT is empty" }
-    Write-Host "  [OK] PoC GitHub PAT retrieved for build (hidden)" -ForegroundColor Green
+    if ([string]::IsNullOrEmpty($OP_POC_GITHUB_TOKEN_REF)) {
+        Write-Warning "OP_POC_GITHUB_TOKEN_REF empty — building with no PoC PAT (matches v4.0.9d shipped state)"
+        $PocGithubPAT = ""
+    } else {
+        $PocGithubPAT = op read $OP_POC_GITHUB_TOKEN_REF
+        if ([string]::IsNullOrWhiteSpace($PocGithubPAT)) { throw "PoC GitHub PAT is empty" }
+        Write-Host "  [OK] PoC GitHub PAT retrieved for build (hidden)" -ForegroundColor Green
+    }
 } catch {
     Write-Host "  [FAIL] Failed to retrieve PoC GitHub PAT from 1Password" -ForegroundColor Red
     Write-Host "  Error: $_" -ForegroundColor Red
