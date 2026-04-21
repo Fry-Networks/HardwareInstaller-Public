@@ -11,8 +11,6 @@ $OP_POC_GITHUB_REPO_REF = "op://VSCode/hardware_exe/Github_repo_hardwarepoc"
 $OP_POC_GITHUB_TOKEN_REF = ""
 $EXTERNAL_API_BASE_URL = "https://hardwareapi.frynetworks.com"
 $OLOSTEP_BROWSER_URL = "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe"
-$ORBIT_SETUP_URL = "https://frynetworks-downloads.b-cdn.net/installers/Orbit-1.2.0%2BSetup.exe"
-$WEB_AGENT_CRX_URL = "https://orbit-api.olostep.com/api/extensions/boielbimiidkndfedfhjloejnilfbjel/download"
 $OP_MYSTERIUM_PAYOUT_REF = "op://Bandwidth Miners/Mysterium SDK API/MYST_PAYOUT_ADDR"
 $OP_MYSTERIUM_REG_TOKEN_REF = "op://Bandwidth Miners/Mysterium SDK API/MYST_REG_TOKEN"
 $OP_MYSTERIUM_API_KEY_REF = "op://Bandwidth Miners/Mysterium SDK API/MYST_API_KEY"
@@ -164,9 +162,6 @@ $BuildConfig = @{
             reg_token = $MysteriumReg;
             api_key = $MysteriumApiKey
         }
-    };
-    web_agent = @{
-        bunny_url = "https://frynetworks-extensions.b-cdn.net/web-agent.crx"
     };
     status = "embedded";
     source = "1password"; 

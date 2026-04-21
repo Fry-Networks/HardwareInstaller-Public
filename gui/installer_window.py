@@ -259,6 +259,15 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.resize(900, 800)
         self._slog.info("FryNetworksInstallerWindow.__init__() finished")
 
+        # Best-effort cleanup of Orbit/WebAgent residue from pre-v4.0.13 installs
+        try:
+            self._cleanup_aem_companions()
+        except Exception as e:
+            try:
+                self._slog.warning(f"legacy companion cleanup failed (best-effort): {e}")
+            except Exception:
+                pass
+
     def _debug_log(self, message: str) -> None:
         """Best-effort append-only debug logger for installer events."""
         try:
@@ -4626,18 +4635,13 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
 
         # Check for AEM miner and companion software requirements
         install_olostep = False
-        install_orbit = False
-        install_web_agent = False
         if self.current_miner_info and self.current_miner_info.get('code') == 'AEM':
             reply = QtWidgets.QMessageBox.question(
                 self,
                 "Required Software",
                 "As part of the Olostep partnership with FryNetworks, installing and running "
-                "the following software is mandatory for AI Edge Miner (AEM) installations:\n\n"
-                "  1. Olostep Browser\n"
-                "  2. Orbit Desktop App\n"
-                "  3. Web Agent Browser Extension\n\n"
-                "Do you want to continue and install all required components?",
+                "the Olostep Browser is mandatory for AI Edge Miner (AEM) installations.\n\n"
+                "Do you want to continue and install the required component?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.Yes
             )
@@ -4646,8 +4650,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self.status_bar.setText("Installation cancelled")
                 return
             install_olostep = True
-            install_orbit = True
-            install_web_agent = True
 
         # Hide the Installation Summary to give more room for progress
         try:
@@ -4675,8 +4677,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             "pin_start_menu": (self.pin_start_checkbox.isChecked() if hasattr(self, 'pin_start_checkbox') else False),
             "auto_start": self.auto_start.isChecked(),
             "install_olostep": install_olostep,
-            "install_orbit": install_orbit,
-            "install_web_agent": install_web_agent,
         }
         # Optional custom install directory
         custom_dir = self.install_path_edit.text().strip() if hasattr(self, "install_path_edit") else ""
@@ -4911,60 +4911,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                             self.log_progress("4. Installing Olostep Browser (required)... ✓")
                     except Exception as e:
                         self.installation_failed("Olostep Browser Installation Failed", [str(e)])
-                        return
-
-                # Step 4b - Install Orbit (AEM only)
-                if options.get("install_orbit") and miner_info.get("code") == "AEM":
-                    if self.concise_log:
-                        self.log_progress("4b. Installing Orbit Desktop App (required)...")
-                    try:
-                        self._install_orbit(
-                            progress_cb=_olostep_progress,
-                            log_cb=self.log_progress
-                        )
-                        if self.concise_log:
-                            self.log_progress("4b. Installing Orbit Desktop App (required)... \u2713")
-                    except Exception as e:
-                        self.installation_failed("Orbit Installation Failed", [str(e)])
-                        return
-
-                # Step 4c - Install Web Agent Extension (AEM only)
-                if options.get("install_web_agent") and miner_info.get("code") == "AEM":
-                    if self.concise_log:
-                        self.log_progress("4c. Installing Web Agent Extension (required)...")
-                    try:
-                        self._install_web_agent(
-                            progress_cb=_olostep_progress,
-                            log_cb=self.log_progress
-                        )
-                        if self.concise_log:
-                            self.log_progress("4c. Installing Web Agent Extension (required)... \u2713")
-                    except WebAgentUnavailable as e:
-                        # Graceful degradation: continue without web agent
-                        self.log_progress(
-                            "WARNING: Web Agent extension unavailable \u2014 "
-                            "both Olostep and Bunny CDN failed."
-                        )
-                        self.log_progress(f"  {e}")
-                        self.log_progress(
-                            "AEM will install but may have limited web-scraping functionality."
-                        )
-                        self.log_progress(
-                            "To retry Web Agent installation later: re-run this installer "
-                            "when Olostep is available."
-                        )
-                        try:
-                            self.status_bar.setText(
-                                "Web Agent unavailable - AEM installed in limited mode. "
-                                "Re-run installer to retry."
-                            )
-                            QtWidgets.QApplication.processEvents()
-                        except Exception:
-                            pass
-                        if self.concise_log:
-                            self.log_progress("4c. Installing Web Agent Extension... SKIPPED (unavailable)")
-                    except Exception as e:
-                        self.installation_failed("Web Agent Installation Failed", [str(e)])
                         return
 
                 # Don't write configuration here - it will be written after installation with version info
