@@ -176,7 +176,7 @@ def build_msi(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     wixobj = output_dir / "installer.wixobj"
-    msi_out = output_dir / f"fry_installer_{version}.msi"
+    msi_out = output_dir / f"frynetworks_installer_v{version}.msi"
 
     candle_exe = shutil.which("candle") or str(Path("C:/Program Files (x86)/WiX Toolset v3.14/bin/candle.exe"))
     light_exe = shutil.which("light") or str(Path("C:/Program Files (x86)/WiX Toolset v3.14/bin/light.exe"))
