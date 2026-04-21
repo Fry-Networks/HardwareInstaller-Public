@@ -447,6 +447,12 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 pass
             manage_row.addWidget(manage_btn, 0)
 
+            update_btn = QtWidgets.QPushButton("Check for Updates")
+            update_btn.setToolTip("Check for a newer version of this installer")
+            update_btn.setFixedHeight(36)
+            update_btn.clicked.connect(self._check_for_updates_clicked)
+            manage_row.addWidget(update_btn, 0)
+
             warning_label = QtWidgets.QLabel("")
             warning_label.setWordWrap(True)
             warning_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
@@ -3753,17 +3759,96 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             task_autostart_action = menu.addAction("Launch installer on login (all users, Scheduled Task)")
             task_autostart_action.setCheckable(True)
             task_autostart_action.setChecked(self._is_installer_task_autostart_enabled())
+        menu.addSeparator()
+        update_action = menu.addAction("Check for Updates")
         exit_action = menu.addAction("Exit FryNetworks Installer")
         show_action.triggered.connect(self._restore_from_tray)
         autostart_action.triggered.connect(lambda checked: self._toggle_installer_autostart(checked))
         if task_autostart_action:
             task_autostart_action.triggered.connect(lambda checked: self._toggle_installer_task_autostart(checked))
+        update_action.triggered.connect(self._check_for_updates_clicked)
         exit_action.triggered.connect(self._exit_from_tray)
         tray.setContextMenu(menu)
         tray.activated.connect(self._on_tray_activated)
         tray.show()
         self._slog.info("_setup_tray_icon(): tray.show() called — tray icon now visible")
         self._tray_icon = tray
+
+    def _check_for_updates_clicked(self) -> None:
+        """Shell out to the installed updater with stage-text modal progress."""
+        from pathlib import Path
+        from version import WINDOWS_VERSION
+        updater_path = Path(
+            os.environ.get('PROGRAMDATA', r'C:\ProgramData')
+        ) / 'FryNetworks' / 'updater' / 'frynetworks_updater.exe'
+
+        if not updater_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Check for Updates",
+                f"Updater is not installed at:\n{updater_path}\n\n"
+                "Please re-run the installer to repair the updater component."
+            )
+            try:
+                self._slog.warning(
+                    f"Check for Updates: updater missing at {updater_path}")
+            except Exception:
+                pass
+            return
+
+        progress = QtWidgets.QProgressDialog(
+            "Checking for updates...", None, 0, 0, self)
+        progress.setWindowTitle("Check for Updates")
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        proc = QtCore.QProcess(self)
+        proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
+
+        def _on_ready_read():
+            try:
+                chunk = bytes(proc.readAllStandardOutput()).decode(
+                    "utf-8", errors="replace")
+            except Exception:
+                chunk = ""
+            if not chunk:
+                return
+            try:
+                self._slog.debug(f"updater stdout: {chunk.strip()}")
+            except Exception:
+                pass
+            low = chunk.lower()
+            if "downloading" in low:
+                progress.setLabelText("Downloading update...")
+            elif "launching" in low:
+                progress.setLabelText("Launching installer...")
+            elif "checking" in low:
+                progress.setLabelText("Checking for updates...")
+
+        def _on_finished(exit_code, _exit_status):
+            progress.close()
+            if exit_code == 0:
+                QtWidgets.QMessageBox.information(
+                    self, "Check for Updates",
+                    "Update check complete. If a newer version was available, "
+                    "the installer has been launched."
+                )
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self, "Check for Updates",
+                    f"Updater exited with code {exit_code}.\n\n"
+                    "See the updater log for details."
+                )
+                try:
+                    self._slog.warning(
+                        f"frynetworks_updater.exe exited with code {exit_code}")
+                except Exception:
+                    pass
+
+        proc.readyReadStandardOutput.connect(_on_ready_read)
+        proc.finished.connect(_on_finished)
+        proc.start(str(updater_path), ["--current-version", str(WINDOWS_VERSION)])
 
     def _restore_from_tray(self):
         """Restore window when user selects Show from tray."""
