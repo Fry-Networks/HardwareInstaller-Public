@@ -21,7 +21,7 @@ import argparse
 import os
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 _logger = logging.getLogger(__name__)
 _logger.addHandler(logging.NullHandler())
@@ -211,6 +211,103 @@ def _setup_startup_logger() -> logging.Logger:
     return logger
 
 
+def _read_installed_installer_version() -> Optional[str]:
+    """Return DisplayVersion of installed FryNetworks Installer, or None.
+    Scans HKLM/HKCU x 64-bit/32-bit registry views."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import winreg
+        path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+        views = [winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY]
+        for root in roots:
+            for view in views:
+                try:
+                    with winreg.OpenKey(root, path, 0, winreg.KEY_READ | view) as key:
+                        i = 0
+                        while True:
+                            try:
+                                subkey_name = winreg.EnumKey(key, i)
+                                with winreg.OpenKey(key, subkey_name, 0,
+                                                    winreg.KEY_READ | view) as sub:
+                                    try:
+                                        dn, _ = winreg.QueryValueEx(sub, "DisplayName")
+                                        if ("frynetworks" in dn.lower()
+                                                and "installer" in dn.lower()):
+                                            dv, _ = winreg.QueryValueEx(sub, "DisplayVersion")
+                                            return str(dv)
+                                    except OSError:
+                                        pass
+                                i += 1
+                            except OSError:
+                                break
+                except OSError:
+                    continue
+    except ImportError:
+        pass
+    return None
+
+
+def _compare_versions(a: str, b: str) -> int:
+    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples.
+
+    Inlined here (not imported from tools.updater) because the installer
+    PyInstaller spec does not bundle tools/ as an importable package.
+    """
+    def tup(s):
+        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
+        parts = s.split(".") if s else []
+        out = []
+        for p in parts:
+            try:
+                out.append(int(p))
+            except ValueError:
+                out.append(0)
+        return tuple(out)
+    ta, tb = tup(a), tup(b)
+    if ta < tb: return -1
+    if ta > tb: return 1
+    return 0
+
+
+def _self_downgrade_check():
+    """L2: refuse to run if a newer FryNetworks Installer is already installed.
+
+    Runs BEFORE QApplication construction so the GUI never flashes
+    on-screen in the refusal case.
+    """
+    try:
+        from version import WINDOWS_VERSION
+    except Exception:
+        return  # Can't check; don't block.
+    installed = _read_installed_installer_version()
+    if not installed:
+        return  # No prior install.
+    embedded = WINDOWS_VERSION
+    # normalize both for comparison
+    inst_v = installed if installed.startswith("v") else f"v{installed}"
+    emb_v = embedded if embedded.startswith("v") else f"v{embedded}"
+    if _compare_versions(inst_v, emb_v) <= 0:
+        return  # Upgrade or same version — proceed.
+    # Downgrade detected: show dialog and exit.
+    from PySide6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    msg = QtWidgets.QMessageBox()
+    msg.setIcon(QtWidgets.QMessageBox.Icon.Critical)
+    msg.setWindowTitle("Cannot Install Older Version")
+    msg.setText(
+        f"Cannot install FryNetworks Installer v{embedded}.\n\n"
+        f"A newer version (v{installed}) is already installed.\n"
+        "Please use your currently installed version or download\n"
+        "the latest release from:\n"
+        "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases"
+    )
+    msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+    msg.exec()
+    sys.exit(2)
+
+
 def launch_gui(args):
     """Launch the graphical installer interface."""
     # Hide console window on Windows for GUI mode to prevent duplicate icons
@@ -238,6 +335,8 @@ def launch_gui(args):
             print("  pip install PySide6")
             _slog.error("PySide6 import failed")
             return 1
+
+        _self_downgrade_check()
 
         # Single-instance guard with communication to close old instances
         # This ensures that when a new version is launched (e.g., after update),
