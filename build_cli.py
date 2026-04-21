@@ -125,6 +125,22 @@ def run_build(version):
         return False
 
 
+def emit_sha256(file_path: Path) -> Optional[Path]:
+    """Write a .sha256 sidecar file next to file_path. Returns the sidecar path or None."""
+    if not file_path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    sha_path = file_path.with_suffix(file_path.suffix + ".sha256")
+    sha_path.write_text(f"{digest}  {file_path.name}\n", encoding="utf-8", newline="\n")
+    print(f"[SHA256] {digest}  {file_path.name}")
+    print(f"[SHA256] Written to {sha_path}")
+    return sha_path
+
+
 # --- MSI helpers (WiX) ---
 
 def _guess_installer_exe(dist_dir: Path) -> Optional[Path]:
@@ -222,15 +238,7 @@ def build_msi(
         print(f"[MSI] Built {msi_out}")
 
         if emit_checksum:
-            sha_path = msi_out.with_suffix(msi_out.suffix + ".sha256")
-            h = hashlib.sha256()
-            with open(msi_out, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    h.update(chunk)
-            digest = h.hexdigest()
-            sha_path.write_text(f"{digest}  {msi_out.name}\n", encoding="utf-8")
-            print(f"[MSI] SHA256: {digest}")
-            print(f"[MSI] Checksum written to {sha_path}")
+            emit_sha256(msi_out)
         return True
     except FileNotFoundError:
         print("WiX tools not found (candle/light). Install WiX Toolset 3.x and ensure it's on PATH.")
@@ -387,6 +395,14 @@ Examples:
     
     if success:
         print(f"\nV Build completed successfully for version {target_version}")
+        # Emit SHA256 for every .msi and .exe in output directories
+        output_dirs = [Path(__file__).parent / "packaging" / "out",
+                       Path(__file__).parent / "dist"]
+        for d in output_dirs:
+            if not d.exists():
+                continue
+            for artifact in sorted(list(d.glob("*.msi")) + list(d.glob("*.exe"))):
+                emit_sha256(artifact)
         if args.msi and (sys.platform.startswith("win") or os.name == "nt"):
             exe_path = Path(args.msi_exe) if args.msi_exe else None
             out_dir = Path(args.msi_out_dir) if args.msi_out_dir else None
