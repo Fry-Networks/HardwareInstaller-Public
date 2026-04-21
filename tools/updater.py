@@ -179,6 +179,24 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def compare_versions(a: str, b: str) -> int:
+    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples."""
+    def tup(s):
+        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
+        parts = s.split(".") if s else []
+        out = []
+        for p in parts:
+            try:
+                out.append(int(p))
+            except ValueError:
+                out.append(0)
+        return tuple(out)
+    ta, tb = tup(a), tup(b)
+    if ta < tb: return -1
+    if ta > tb: return 1
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     log_file = log_path(args.log)
@@ -186,8 +204,10 @@ def main() -> int:
     try:
         current_version = discover_installer_version(args.current_version, log_file)
         if not current_version:
+            print("CANNOT_DETERMINE_INSTALLER_VERSION")
             return 2
         write_log(f"Current version: {current_version}", log_file)
+        print(f"Checking for updates... (current: {current_version})")
 
         token = args.token or os.environ.get("GITHUB_TOKEN") or DEFAULT_EMBEDDED_TOKEN or None
 
@@ -195,8 +215,22 @@ def main() -> int:
         remote_ver = normalize_version(release.get("tag_name", ""))
         write_log(f"Latest release: {remote_ver}", log_file)
 
-        if current_version and remote_ver and remote_ver == current_version:
-            write_log("No update needed.", log_file)
+        if not remote_ver:
+            write_log(
+                "Could not parse remote version. Refusing to update.",
+                log_file,
+            )
+            print("Could not determine remote version.")
+            return 1
+
+        cmp = compare_versions(remote_ver, current_version)
+        if cmp <= 0:
+            write_log(
+                f"Remote v{remote_ver} is not newer than current v{current_version}. "
+                "No update needed (downgrade refused).",
+                log_file,
+            )
+            print("No update needed.")
             return 0
 
         installer_asset = find_installer_asset(release)
@@ -216,9 +250,15 @@ def main() -> int:
             return 0
 
         write_log(f"Downloading {msi_url} to {dest}", log_file)
+        print("Downloading update...")
         download(cast(str, msi_url), dest, token)
 
-        sha_asset = find_asset(release, ".sha256")
+        sha_asset_name = (installer_asset.get("name", "") + ".sha256").lower()
+        sha_asset = next(
+            (a for a in release.get("assets", [])
+             if a.get("name", "").lower() == sha_asset_name),
+            None,
+        )
         if sha_asset:
             sha_url = sha_asset.get("browser_download_url")
             if not sha_url:
@@ -234,6 +274,7 @@ def main() -> int:
                     return 1
             write_log("Checksum verified.", log_file)
 
+        print("Launching installer...")
         run_installer(dest, args.quiet, log_file)
         write_log("Update triggered (msiexec launched).", log_file)
         return 0
