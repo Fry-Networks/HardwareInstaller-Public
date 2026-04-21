@@ -119,27 +119,30 @@ def discover_installer_version(cli_version: Optional[str], log_file: Path) -> Op
             import winreg
             uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
             for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-                try:
-                    with winreg.OpenKey(root, uninstall_key) as key:
-                        i = 0
-                        while True:
-                            try:
-                                subkey_name = winreg.EnumKey(key, i)
-                                with winreg.OpenKey(key, subkey_name) as subkey:
-                                    try:
-                                        display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
-                                        if "frynetworks" in display_name.lower() and "installer" in display_name.lower():
-                                            display_ver, _ = winreg.QueryValueEx(subkey, "DisplayVersion")
-                                            ver = normalize_version(str(display_ver))
-                                            write_log(f"Version source: ARP registry -> {ver}", log_file)
-                                            return ver
-                                    except OSError:
-                                        pass
-                                i += 1
-                            except OSError:
-                                break
-                except OSError:
-                    pass
+                for view_flag in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+                    try:
+                        with winreg.OpenKey(root, uninstall_key, 0,
+                                            winreg.KEY_READ | view_flag) as key:
+                            i = 0
+                            while True:
+                                try:
+                                    subkey_name = winreg.EnumKey(key, i)
+                                    with winreg.OpenKey(key, subkey_name, 0,
+                                                        winreg.KEY_READ | view_flag) as subkey:
+                                        try:
+                                            display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
+                                            if "frynetworks" in display_name.lower() and "installer" in display_name.lower():
+                                                display_ver, _ = winreg.QueryValueEx(subkey, "DisplayVersion")
+                                                ver = normalize_version(str(display_ver))
+                                                write_log(f"Version source: ARP registry -> {ver}", log_file)
+                                                return ver
+                                        except OSError:
+                                            pass
+                                    i += 1
+                                except OSError:
+                                    break
+                    except OSError:
+                        pass
         except ImportError:
             pass
 
