@@ -164,8 +164,8 @@ class ConfigManager:
                 "install_date": datetime.now().isoformat(),
                 "system_wide": system_wide,
                 "version": "2.3.14",
-                "gui_version": gui_version or "unknown",
-                "poc_version": poc_version or "unknown"
+                "gui_version": gui_version or "Unknown",
+                "poc_version": poc_version or "Unknown"
                 # NOTE: Bearer tokens and other sensitive data stored in encrypted files only
             }
             
