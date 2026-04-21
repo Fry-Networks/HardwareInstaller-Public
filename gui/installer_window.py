@@ -2216,9 +2216,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Show a simple, non-detailed warning to avoid clutter on the main page
         icon_src = self._get_warning_icon_data_url()
         if icon_src:
-            label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Updates available</b>')
+            label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Miner updates available</b>')
         else:
-            label.setText("<b>Updates available</b>")
+            label.setText("<b>Miner updates available</b>")
         label.setVisible(True)
 
     def _handle_version_warning_update(self, warnings: Optional[List[str]]) -> None:
@@ -2241,7 +2241,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     summary += f"\n(+{len(new_warnings) - 3} more)"
                 self._tray_icon.showMessage(
                     "FryNetworks Installer",
-                    f"Updates required:\n{summary}",
+                    f"Miner updates required:\n{summary}",
                     QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
                     5000,
                 )
@@ -5395,8 +5395,8 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
             pass
         
         # Get URL from environment/config
-        olostep_url = os.getenv('OLOSTEP_BROWSER_URL', 
-                                'https://olostepbrowser.s3.us-east-1.amazonaws.com/updates/win32/x64/Olostep-Browser-1.0.1+Setup.exe')
+        olostep_url = os.getenv('OLOSTEP_BROWSER_URL',
+                                'https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe')
         
         _status("Downloading Olostep Browser...")
         

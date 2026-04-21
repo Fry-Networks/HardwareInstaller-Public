@@ -86,6 +86,72 @@ def find_asset(release: dict, suffix: str) -> Optional[dict]:
     return None
 
 
+def find_installer_asset(release: dict) -> Optional[dict]:
+    """Find the installer asset, preferring MSI over EXE, filtered to frynetworks_installer_* prefix."""
+    candidates = []
+    for asset in release.get("assets", []):
+        name = asset.get("name", "").lower()
+        if name.startswith("frynetworks_installer_"):
+            candidates.append(asset)
+    if not candidates:
+        return None
+    for c in candidates:
+        if c.get("name", "").lower().endswith(".msi"):
+            return c
+    return candidates[0]
+
+
+def discover_installer_version(cli_version: Optional[str], log_file: Path) -> Optional[str]:
+    """
+    Discover the installed version via a cascade:
+      1. CLI --current-version argument
+      2. ARP registry DisplayVersion for FryNetworks Installer
+      3. Filename pattern (frynetworks_installer_v*.exe next to updater)
+      4. Hard-fail (return None)
+    """
+    if cli_version:
+        ver = normalize_version(cli_version)
+        write_log(f"Version source: CLI argument -> {ver}", log_file)
+        return ver
+
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+            uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(root, uninstall_key) as key:
+                        i = 0
+                        while True:
+                            try:
+                                subkey_name = winreg.EnumKey(key, i)
+                                with winreg.OpenKey(key, subkey_name) as subkey:
+                                    try:
+                                        display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
+                                        if "frynetworks" in display_name.lower() and "installer" in display_name.lower():
+                                            display_ver, _ = winreg.QueryValueEx(subkey, "DisplayVersion")
+                                            ver = normalize_version(str(display_ver))
+                                            write_log(f"Version source: ARP registry -> {ver}", log_file)
+                                            return ver
+                                    except OSError:
+                                        pass
+                                i += 1
+                            except OSError:
+                                break
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+
+    ver = read_version_from_installer(Path(__file__).resolve().parent)
+    if ver:
+        write_log(f"Version source: filename pattern -> {ver}", log_file)
+        return ver
+
+    write_log("CANNOT_DETERMINE_INSTALLER_VERSION: all discovery methods exhausted.", log_file)
+    return None
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -118,10 +184,10 @@ def main() -> int:
     log_file = log_path(args.log)
 
     try:
-        current_version = normalize_version(args.current_version) if args.current_version else None
+        current_version = discover_installer_version(args.current_version, log_file)
         if not current_version:
-            current_version = read_version_from_installer(Path(__file__).resolve().parent)
-        write_log(f"Current version: {current_version or 'unknown'}", log_file)
+            return 2
+        write_log(f"Current version: {current_version}", log_file)
 
         token = args.token or os.environ.get("GITHUB_TOKEN") or DEFAULT_EMBEDDED_TOKEN or None
 
@@ -133,16 +199,16 @@ def main() -> int:
             write_log("No update needed.", log_file)
             return 0
 
-        msi_asset = find_asset(release, ".exe")
-        if not msi_asset:
+        installer_asset = find_installer_asset(release)
+        if not installer_asset:
             write_log("No installer asset found in latest release.", log_file)
             return 1
 
-        msi_url = msi_asset.get("browser_download_url")
+        msi_url = installer_asset.get("browser_download_url")
         if not msi_url:
-            write_log("MSI asset missing download URL.", log_file)
+            write_log("Installer asset missing download URL.", log_file)
             return 1
-        msi_name = msi_asset.get("name", "update.msi")
+        msi_name = installer_asset.get("name", "update.exe")
         dest = Path(tempfile.gettempdir()) / msi_name
 
         if args.dry_run:
