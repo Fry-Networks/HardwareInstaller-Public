@@ -6296,7 +6296,6 @@ foreach ($loc in $locations) {{
           - Users who manually deleted a rule
         """
         from core.firewall_manager import FirewallManager
-        from core.key_parser import MINER_TYPES
         from pathlib import Path
 
         self._debug_log("[firewall] startup sweep entered")
@@ -6304,7 +6303,7 @@ foreach ($loc in $locations) {{
 
         program_data = Path(r'C:\ProgramData\FryNetworks')
         if program_data.exists():
-            for miner_code in MINER_TYPES:
+            for miner_code in self.parser.MINER_TYPES:
                 miner_dir = program_data / f'miner-{miner_code}'
                 if miner_dir.exists():
                     fwm.add_miner_rules(miner_code, miner_dir)

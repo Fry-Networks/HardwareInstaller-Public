@@ -1103,6 +1103,10 @@ class WindowsServiceManager:
 
             # Firewall: ensure Allow rules so the Windows Security Alert
             # popup never appears for this miner's binaries.
+            # NOTE: debug_log=print sends firewall logs to stdout (console),
+            # not install_debug.log. Acceptable for now — the startup sweep
+            # in installer_window._ensure_firewall_rules() uses the file
+            # logger. Future pass: thread options['log_callback'] here.
             try:
                 from core.firewall_manager import FirewallManager
                 fwm = FirewallManager(debug_log=print)
@@ -1643,6 +1647,7 @@ class WindowsServiceManager:
                 result["errors"].append(f"Warning: Could not remove service registration - {str(e)}")
 
             # Firewall: remove Allow rules for this miner's binaries.
+            # NOTE: debug_log=print — see install-side comment above.
             try:
                 from core.firewall_manager import FirewallManager
                 fwm = FirewallManager(debug_log=print)
