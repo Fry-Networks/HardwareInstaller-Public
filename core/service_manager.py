@@ -1112,6 +1112,12 @@ class WindowsServiceManager:
                 fwm = FirewallManager(debug_log=print)
                 fwm.add_miner_rules(self.miner_code, self.base_dir)
                 result["actions"].append("Added firewall rules for miner binaries")
+                log_callback = options.get('log_callback')
+                if callable(log_callback):
+                    try:
+                        log_callback('firewall_info', "Configured firewall rules... \u2713")
+                    except Exception:
+                        pass
             except Exception as e:
                 result["errors"].append(f"Warning: Could not add firewall rules: {e}")
 
