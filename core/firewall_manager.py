@@ -11,11 +11,25 @@ rules in the firewall admin UI.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
 
 _PS_TIMEOUT_SECONDS = 30
+
+# Belt-and-suspenders: CREATE_NO_WINDOW prevents a console window from
+# being allocated; STARTUPINFO+SW_HIDE hides it even if one is created.
+_NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
+
+def _hidden_startupinfo():
+    """Return a STARTUPINFO that hides the child process window (Windows only)."""
+    if os.name != 'nt':
+        return None
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    return si
 
 _PS_LAUNCH = [
     'powershell.exe',
@@ -112,6 +126,8 @@ class FirewallManager:
                 capture_output=True,
                 timeout=_PS_TIMEOUT_SECONDS,
                 text=True,
+                creationflags=_NO_WINDOW_FLAGS,
+                startupinfo=_hidden_startupinfo(),
             )
             if r.returncode != 0:
                 stderr = (r.stderr or '').strip()[:500]

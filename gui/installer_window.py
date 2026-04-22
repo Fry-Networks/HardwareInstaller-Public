@@ -40,6 +40,8 @@ from tools.banner import TopBanner
 from tools.external_api import get_external_api_client, ExternalApiClient, _BUILD_CONFIG
 from version import __version__ as version_str
 
+_NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
+
 
 class WebAgentUnavailable(Exception):
     """Raised when the Web Agent CRX cannot be obtained from any tier."""
@@ -6281,7 +6283,8 @@ Register-ScheduledTask -TaskName "FryNetworks_WebAgent_BraveRepair" -Action $act
             subprocess.run(
                 ['powershell', '-NoProfile', '-Command',
                  'Unregister-ScheduledTask -TaskName "FryNetworks_WebAgent_BraveRepair" -Confirm:$false -ErrorAction SilentlyContinue'],
-                capture_output=True, timeout=15
+                capture_output=True, timeout=15,
+                creationflags=_NO_WINDOW_FLAGS,
             )
         except Exception:
             pass
@@ -6312,7 +6315,8 @@ foreach ($loc in $locations) {{
 '''
             subprocess.run(
                 ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
-                capture_output=True, timeout=30
+                capture_output=True, timeout=30,
+                creationflags=_NO_WINDOW_FLAGS,
             )
         except Exception:
             pass
@@ -6322,7 +6326,8 @@ foreach ($loc in $locations) {{
             subprocess.run(
                 ['powershell', '-NoProfile', '-Command',
                  f"Remove-MpPreference -ExclusionPath '{ext_dir_str}'"],
-                capture_output=True, timeout=15
+                capture_output=True, timeout=15,
+                creationflags=_NO_WINDOW_FLAGS,
             )
         except Exception:
             pass
@@ -6342,7 +6347,8 @@ foreach ($loc in $locations) {{
             if orbit_updater.exists():
                 subprocess.run(
                     [str(orbit_updater), '--uninstall'],
-                    capture_output=True, timeout=120
+                    capture_output=True, timeout=120,
+                    creationflags=_NO_WINDOW_FLAGS,
                 )
         except Exception:
             pass
