@@ -246,9 +246,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         if display_version:
             # Avoid double "v" when version already includes it (e.g., v1.1.1)
             prefix = "" if display_version.lstrip().lower().startswith("v") else "v"
-            window_title = f"FryNetworks Miners and Nodes Installer {prefix}{display_version}{platform_suffix}"
+            window_title = f"Fry Networks Miners and Nodes Installer {prefix}{display_version}{platform_suffix}"
         else:
-            window_title = f"FryNetworks Miners and Nodes Installer{platform_suffix}"
+            window_title = f"Fry Networks Miners and Nodes Installer{platform_suffix}"
         
         # Add TEST VERSIONS suffix when test mode is enabled
         if self._use_test_versions:
@@ -499,7 +499,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
         
         # Configure wizard
-        self.wizard.setWindowTitle("FryNetworks Miners and Nodes Installer")
+        self.wizard.setWindowTitle("Fry Networks Miners and Nodes Installer")
         self.wizard.setWizardStyle(QtWidgets.QWizard.WizardStyle.ModernStyle)
         self.wizard.setOptions(
             QtWidgets.QWizard.WizardOption.NoBackButtonOnStartPage |
@@ -590,7 +590,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             background_path = Path(__file__).parent.parent / "resources" / "background.png"
         
         self.banner = TopBanner(
-            "FryNetworks Miners and Nodes Installer",
+            "Fry Networks Miners and Nodes Installer",
             str(background_path) if background_path.exists() else None,
             height=120
         )
@@ -604,7 +604,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         
         # Key input field
         self.key_input = QtWidgets.QLineEdit()
-        self.key_input.setPlaceholderText("Enter your FryNetworks miner key (e.g., BM-ABC123XYZ...)")
+        self.key_input.setPlaceholderText("Enter your Fry Networks miner key (e.g., BM-ABC123XYZ...)")
         # Listen to text changes (typing) and normalize pasted content via eventFilter
         self.key_input.textChanged.connect(self.on_key_changed)
         try:
@@ -725,7 +725,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "FryNetworks Miners and Nodes Installer",
+                    "Fry Networks Miners and Nodes Installer",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -738,7 +738,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 intro_label = QtWidgets.QLabel(
                     "<div style='font-size:20px; font-weight:bold; color:#ffffff;'>Welcome</div>"
                     "<div style='margin-top:8px; font-size:15px;'>"
-                    "This wizard installs and manages supported FryNetworks miners and nodes on your system."
+                    "This wizard installs and manages supported Fry Networks miners and nodes on your system."
                     "</div>"
                 )
                 intro_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
@@ -1500,7 +1500,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "FryNetworks Miners and Nodes Installer",
+                    "Fry Networks Miners and Nodes Installer",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -1514,7 +1514,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 intro_label = QtWidgets.QLabel(
                     "<div style='font-size:20px; font-weight:bold; color:#ffffff;'>Welcome</div>"
                     "<div style='margin-top:8px; font-size:15px;'>"
-                    "This wizard installs and manages supported FryNetworks miners and nodes on your system."
+                    "This wizard installs and manages supported Fry Networks miners and nodes on your system."
                     "</div>"
                 )
                 intro_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
@@ -2255,7 +2255,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 if len(new_warnings) > 3:
                     summary += f"\n(+{len(new_warnings) - 3} more)"
                 self._tray_icon.showMessage(
-                    "FryNetworks Installer",
+                    "Fry Networks Installer",
                     f"Miner updates required:\n{summary}",
                     QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
                     5000,
@@ -3259,7 +3259,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Page 1: Key Entry
         key_page = KeyEntryPage(self)
         key_page.setTitle("Enter Miner Key")
-        key_page.setSubTitle("Enter your FryNetworks miner key to begin installation")
+        key_page.setSubTitle("Enter your Fry Networks miner key to begin installation")
         
         key_layout = QtWidgets.QVBoxLayout(key_page)
         self.create_key_section(key_layout)
@@ -3512,7 +3512,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             if "Key" in title:
                 QtWidgets.QMessageBox.information(
                     self, "Help - Enter Miner Key",
-                    "Enter your FryNetworks miner key in the format BM-ABC123XYZ.\n\n"
+                    "Enter your Fry Networks miner key in the format BM-ABC123XYZ.\n\n"
                     "The key will be validated automatically and checked for conflicts."
                 )
             elif "Settings" in title:
@@ -3750,7 +3750,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         tray.setToolTip("Fry Installer - Install and update Fry miners and nodes")
 
         menu = QtWidgets.QMenu(self)
-        show_action = menu.addAction("Show FryNetworks Installer")
+        show_action = menu.addAction("Show Fry Networks Installer")
         autostart_action = menu.addAction("Launch installer on login")
         autostart_action.setCheckable(True)
         autostart_action.setChecked(self._is_installer_autostart_enabled())
@@ -3761,7 +3761,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             task_autostart_action.setChecked(self._is_installer_task_autostart_enabled())
         menu.addSeparator()
         update_action = menu.addAction("Check for Updates")
-        exit_action = menu.addAction("Exit FryNetworks Installer")
+        exit_action = menu.addAction("Exit Fry Networks Installer")
         show_action.triggered.connect(self._restore_from_tray)
         autostart_action.triggered.connect(lambda checked: self._toggle_installer_autostart(checked))
         if task_autostart_action:
@@ -3880,7 +3880,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.raise_()
         self.activateWindow()
         try:
-            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "FryNetworks Installer is active."
+            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "Fry Networks Installer is active."
             self.status_bar.setText(status_text)
         except Exception:
             pass
@@ -4293,7 +4293,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             evidence_html = "<br>".join(evidence_lines[:8])  # cap list to avoid overflow
             block_msg = (
                 "<b style='color:#ef4444;'>Installation Blocked: Virtual Machine Detected</b><br>"
-                "FryNetworks miners/nodes must run on physical hardware. The environment appears to be a VM.<br><br>"
+                "Fry Networks miners/nodes must run on physical hardware. The environment appears to be a VM.<br><br>"
                 "<b>Detected indicators:</b><br>" + evidence_html + "<br><br>"
                 "<i>Action:</i> Shut down the VM and run the installer directly on a physical machine."
             )
@@ -4562,7 +4562,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Mark validated
         self.is_key_validated = True
         try:
-            self.key_status.setText(f"✓ {parsed.get('name')} key validated with FryNetworks API")
+            self.key_status.setText(f"✓ {parsed.get('name')} key validated with Fry Networks API")
             self.key_status.setStyleSheet("color: #22c55e; font-weight: bold;")
         except Exception:
             pass
@@ -4735,7 +4735,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             reply = QtWidgets.QMessageBox.question(
                 self,
                 "Required Software",
-                "As part of the Olostep partnership with FryNetworks, installing and running "
+                "As part of the Olostep partnership with Fry Networks, installing and running "
                 "the Olostep Browser is mandatory for AI Edge Miner (AEM) installations.\n\n"
                 "Do you want to continue and install the required component?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
@@ -6663,6 +6663,64 @@ foreach ($loc in $locations) {{
             except Exception:
                 pass
 
+    def _migrate_legacy_shortcut(self, directory: Path, legacy_name: str, new_name: str) -> None:
+        """Rename a FryNetworks*.lnk to Fry Networks*.lnk (v4.0.12 -> v4.0.13 branding)."""
+        try:
+            legacy = directory / legacy_name
+            new = directory / new_name
+            if not legacy.exists():
+                return
+            if new.exists():
+                legacy.unlink()
+                try:
+                    self._debug_log(f"[migrate] removed stale legacy shortcut: {legacy}")
+                except Exception:
+                    pass
+                return
+            legacy.rename(new)
+            try:
+                self._debug_log(f"[migrate] renamed {legacy} -> {new}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._debug_log(f"[migrate] failed to migrate {legacy_name} -> {new_name}: {e!r}")
+            except Exception:
+                pass
+
+    def _migrate_start_menu_folder(self) -> None:
+        """Rename the Start Menu folder from FryNetworks to Fry Networks."""
+        try:
+            start_menu = Path(os.environ.get('APPDATA', '')) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs'
+            old = start_menu / 'FryNetworks'
+            new = start_menu / 'Fry Networks'
+            if not old.exists():
+                return
+            if new.exists():
+                for item in old.iterdir():
+                    target = new / item.name
+                    if not target.exists():
+                        item.rename(target)
+                try:
+                    old.rmdir()
+                except OSError:
+                    pass
+                try:
+                    self._debug_log(f"[migrate] merged {old} into {new}")
+                except Exception:
+                    pass
+                return
+            old.rename(new)
+            try:
+                self._debug_log(f"[migrate] renamed folder {old} -> {new}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._debug_log(f"[migrate] folder migration failed: {e!r}")
+            except Exception:
+                pass
+
     def _create_desktop_shortcut_for_miner(self, miner_code: str, install_path: Path, gui_version: Optional[str]) -> Path:
         """Create a Windows desktop shortcut to the miner GUI executable."""
         if os.name != 'nt':
@@ -6695,7 +6753,9 @@ foreach ($loc in $locations) {{
                 desktop = Path.home() / "Desktop"
                 desktop.mkdir(parents=True, exist_ok=True)
 
-        shortcut_name = f"FryNetworks {miner_code} Miner.lnk"
+        legacy_name = f"FryNetworks {miner_code} Miner.lnk"
+        shortcut_name = f"Fry Networks {miner_code} Miner.lnk"
+        self._migrate_legacy_shortcut(desktop, legacy_name, shortcut_name)
         shortcut_path = desktop / shortcut_name
         if miner_code == "BM":
             # BM shortcut targets powershell.exe so it can inject BM_SHARING_MODE
@@ -6708,7 +6768,7 @@ foreach ($loc in $locations) {{
                 shortcut_path=shortcut_path,
                 target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
                 working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI",
+                description=f"Fry Networks {miner_code} Miner GUI",
                 arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
                 icon_path=str(gui_exe)
             )
@@ -6717,7 +6777,7 @@ foreach ($loc in $locations) {{
                 shortcut_path=shortcut_path,
                 target_path=gui_exe,
                 working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI"
+                description=f"Fry Networks {miner_code} Miner GUI"
             )
         return shortcut_path
 
@@ -6739,9 +6799,13 @@ foreach ($loc in $locations) {{
                 raise FileNotFoundError(f"GUI executable not found for Start menu shortcut in {install_path}")
 
         start_base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        start_dir = start_base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "FryNetworks"
+        self._migrate_start_menu_folder()
+        start_dir = start_base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Fry Networks"
         start_dir.mkdir(parents=True, exist_ok=True)
-        shortcut_path = start_dir / f"FryNetworks {miner_code} Miner.lnk"
+        legacy_lnk = f"FryNetworks {miner_code} Miner.lnk"
+        new_lnk = f"Fry Networks {miner_code} Miner.lnk"
+        self._migrate_legacy_shortcut(start_dir, legacy_lnk, new_lnk)
+        shortcut_path = start_dir / new_lnk
         if miner_code == "BM":
             ps_cmd = (
                 f"$env:BM_SHARING_MODE='mysterium'; "
@@ -6751,7 +6815,7 @@ foreach ($loc in $locations) {{
                 shortcut_path=shortcut_path,
                 target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
                 working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI",
+                description=f"Fry Networks {miner_code} Miner GUI",
                 arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
                 icon_path=str(gui_exe)
             )
@@ -6760,7 +6824,7 @@ foreach ($loc in $locations) {{
                 shortcut_path=shortcut_path,
                 target_path=gui_exe,
                 working_dir=install_path,
-                description=f"FryNetworks {miner_code} Miner GUI"
+                description=f"Fry Networks {miner_code} Miner GUI"
             )
         return shortcut_path
 
@@ -6782,7 +6846,10 @@ foreach ($loc in $locations) {{
             startup_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / \
                 "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
             startup_dir.mkdir(parents=True, exist_ok=True)
-            shortcut_path = startup_dir / f"FryNetworks {miner_code} Miner.lnk"
+            legacy_lnk = f"FryNetworks {miner_code} Miner.lnk"
+            new_lnk = f"Fry Networks {miner_code} Miner.lnk"
+            self._migrate_legacy_shortcut(startup_dir, legacy_lnk, new_lnk)
+            shortcut_path = startup_dir / new_lnk
             if miner_code == "BM":
                 ps_cmd = (
                     f"$env:BM_SHARING_MODE='mysterium'; "
@@ -6792,7 +6859,7 @@ foreach ($loc in $locations) {{
                     shortcut_path=shortcut_path,
                     target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI",
+                    description=f"Fry Networks {miner_code} Miner GUI",
                     arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
                     icon_path=str(gui_exe)
                 )
@@ -6801,7 +6868,7 @@ foreach ($loc in $locations) {{
                     shortcut_path=shortcut_path,
                     target_path=gui_exe,
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI"
+                    description=f"Fry Networks {miner_code} Miner GUI"
                 )
             return shortcut_path
 
@@ -6823,7 +6890,7 @@ foreach ($loc in $locations) {{
             desktop_contents = "\n".join([
                 "[Desktop Entry]",
                 "Type=Application",
-                f"Name=FryNetworks {miner_code} Miner GUI",
+                f"Name=Fry Networks {miner_code} Miner GUI",
                 f"Exec={gui_exe}",
                 f"Path={install_path}",
                 "X-GNOME-Autostart-enabled=true",
@@ -6840,7 +6907,12 @@ foreach ($loc in $locations) {{
         """Detect existing miner shortcuts/pins so updates can recreate them."""
         shortcuts: Dict[str, Path] = {}
 
-        shortcut_name = f"FryNetworks {miner_code} Miner.lnk"
+        # Check both old (FryNetworks) and new (Fry Networks) names so detection
+        # works even if the migration helper hasn't run yet.
+        shortcut_names = [
+            f"Fry Networks {miner_code} Miner.lnk",
+            f"FryNetworks {miner_code} Miner.lnk",
+        ]
 
         if os.name == 'nt':
             # Desktop / OneDrive Desktop
@@ -6850,20 +6922,28 @@ foreach ($loc in $locations) {{
                     Path.home() / "OneDrive" / "Desktop",
                 ]
                 for desk in desktop_candidates:
-                    path = desk / shortcut_name
-                    if path.exists():
-                        shortcuts["desktop"] = path
+                    for sname in shortcut_names:
+                        path = desk / sname
+                        if path.exists():
+                            shortcuts["desktop"] = path
+                            break
+                    if "desktop" in shortcuts:
                         break
             except Exception:
                 pass
 
-            # Start Menu
+            # Start Menu (check both folder names)
             try:
                 start_base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-                start_dir = start_base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "FryNetworks"
-                start_path = start_dir / shortcut_name
-                if start_path.exists():
-                    shortcuts["start_menu"] = start_path
+                for folder in ("Fry Networks", "FryNetworks"):
+                    start_dir = start_base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / folder
+                    for sname in shortcut_names:
+                        start_path = start_dir / sname
+                        if start_path.exists():
+                            shortcuts["start_menu"] = start_path
+                            break
+                    if "start_menu" in shortcuts:
+                        break
             except Exception:
                 pass
 
@@ -6871,9 +6951,11 @@ foreach ($loc in $locations) {{
             try:
                 startup_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / \
                     "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-                startup_path = startup_dir / shortcut_name
-                if startup_path.exists():
-                    shortcuts["startup"] = startup_path
+                for sname in shortcut_names:
+                    startup_path = startup_dir / sname
+                    if startup_path.exists():
+                        shortcuts["startup"] = startup_path
+                        break
             except Exception:
                 pass
 
@@ -6881,9 +6963,11 @@ foreach ($loc in $locations) {{
             try:
                 taskbar_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / \
                     "Microsoft" / "Internet Explorer" / "Quick Launch" / "User Pinned" / "TaskBar"
-                taskbar_path = taskbar_dir / shortcut_name
-                if taskbar_path.exists():
-                    shortcuts["taskbar"] = taskbar_path
+                for sname in shortcut_names:
+                    taskbar_path = taskbar_dir / sname
+                    if taskbar_path.exists():
+                        shortcuts["taskbar"] = taskbar_path
+                        break
             except Exception:
                 pass
 
@@ -6939,7 +7023,7 @@ foreach ($loc in $locations) {{
                     shortcut_path=shortcut_path,
                     target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI",
+                    description=f"Fry Networks {miner_code} Miner GUI",
                     arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
                     icon_path=str(gui_exe)
                 )
@@ -6948,7 +7032,7 @@ foreach ($loc in $locations) {{
                     shortcut_path=shortcut_path,
                     target_path=gui_exe,
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI"
+                    description=f"Fry Networks {miner_code} Miner GUI"
                 )
             cleanup_shortcut = True
 
@@ -7018,7 +7102,7 @@ if ($item -ne $null) {{
                     shortcut_path=shortcut_path,
                     target_path=Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI",
+                    description=f"Fry Networks {miner_code} Miner GUI",
                     arguments=f'-NoProfile -WindowStyle Hidden -Command "{ps_cmd}"',
                     icon_path=str(gui_exe)
                 )
@@ -7027,7 +7111,7 @@ if ($item -ne $null) {{
                     shortcut_path=shortcut_path,
                     target_path=gui_exe,
                     working_dir=install_path,
-                    description=f"FryNetworks {miner_code} Miner GUI"
+                    description=f"Fry Networks {miner_code} Miner GUI"
                 )
             cleanup_shortcut = True
 

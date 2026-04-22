@@ -2453,19 +2453,19 @@ class WindowsServiceManager:
 
             # Check results and return appropriate error messages
             if not gui_ok and not poc_ok:
-                print("[error] Installation failed - unable to download both GUI and PoC executables from FryNetworks")
+                print("[error] Installation failed - unable to download both GUI and PoC executables from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             elif not gui_ok:
-                print("[error] Installation failed - unable to download GUI executable from FryNetworks")
+                print("[error] Installation failed - unable to download GUI executable from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             elif not poc_ok:
-                print("[error] Installation failed - unable to download PoC executable from FryNetworks")
+                print("[error] Installation failed - unable to download PoC executable from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             
             # Both downloads succeeded
@@ -3819,19 +3819,19 @@ class LinuxServiceManager:
 
             # Check results and return appropriate error messages
             if not gui_ok and not poc_ok:
-                print("[error] Installation failed - unable to download both GUI and PoC executables from FryNetworks")
+                print("[error] Installation failed - unable to download both GUI and PoC executables from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             elif not gui_ok:
-                print("[error] Installation failed - unable to download GUI executable from FryNetworks")
+                print("[error] Installation failed - unable to download GUI executable from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             elif not poc_ok:
-                print("[error] Installation failed - unable to download PoC executable from FryNetworks")
+                print("[error] Installation failed - unable to download PoC executable from Fry Networks")
                 print("         Please verify your network connection and try again.")
-                print("         If the problem persists, open a ticket on the FryNetworks Discord server.")
+                print("         If the problem persists, open a ticket on the Fry Networks Discord server.")
                 return False, attempts, None, None
             
             # Both downloads succeeded
@@ -3893,7 +3893,7 @@ class LinuxServiceManager:
                 service_user_group = ""
 
             service_content = f"""[Unit]
-Description=FryNetworks {self.miner_code} Miner
+Description=Fry Networks {self.miner_code} Miner
 After=network.target
 Wants=network.target
 
