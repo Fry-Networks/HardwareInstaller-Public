@@ -5415,29 +5415,33 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                     pass
             _status(msg)
 
-        # Olostep uses a Squirrel installer framework.  Squirrel always
-        # lands at %LOCALAPPDATA%\Olostep-Browser\OlostepBrowser.exe.
-        # Legacy paths (Program Files, Programs subfolder, space-in-name)
-        # were wrong for Squirrel and are removed.
+        # Squirrel always lands at %LOCALAPPDATA%\Olostep-Browser\OlostepBrowser.exe.
         olostep_exe = Path(os.environ.get('LOCALAPPDATA', '')) / 'Olostep-Browser' / 'OlostepBrowser.exe'
-        possible_paths = [olostep_exe]
+        self._debug_log(f"[Olostep] checking canonical Squirrel path: {olostep_exe}")
 
-        for path in possible_paths:
-            if path.exists():
-                self._debug_log(f"[Olostep] already installed at {path}")
-                _status("Olostep Browser is already installed")
-                return  # Already installed, skip installation
+        if olostep_exe.exists():
+            self._debug_log("[Olostep] already installed — skipping install")
+            _log(f"Olostep Browser already installed at {olostep_exe}")
+            return
 
-        # If Olostep Browser process is already running (even if installed in a
-        # non-standard location), skip the download/install step.
+        self._debug_log("[Olostep] not installed at canonical path — proceeding with install")
+
+        # Kill any stray Olostep processes from non-Squirrel locations
+        # (old manual install, dev workspace, etc.).  We only reach here
+        # when olostep_exe is missing, so any running Olostep is from
+        # the wrong path and would hold file handles Squirrel needs.
         try:
-            if self._is_olostep_running():
-                self._debug_log("[Olostep] process already running, skipping install")
-                _status("Olostep Browser is already running")
-                return
-        except Exception:
-            # If the running-check fails, continue with install attempt
-            pass
+            subprocess.run(
+                ['taskkill', '/F', '/IM', 'OlostepBrowser.exe'],
+                capture_output=True, timeout=15,
+            )
+            subprocess.run(
+                ['taskkill', '/F', '/IM', 'Olostep.exe'],
+                capture_output=True, timeout=15,
+            )
+            self._debug_log("[Olostep] ran taskkill sweep for stray processes")
+        except Exception as e:
+            self._debug_log(f"[Olostep] taskkill sweep failed (non-fatal): {e!r}")
 
         # Get URL from environment/config
         olostep_url = os.getenv('OLOSTEP_BROWSER_URL',
@@ -5479,12 +5483,14 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
 
             _status("Installing Olostep Browser...")
 
-            # Run installer silently (Squirrel uses --silent, not NSIS /S)
-            self._debug_log(f"[Olostep] running {installer_path} --silent")
+            # Olostep's setup.exe (Squirrel) has no install wizard — it
+            # auto-installs when launched with no flags.  Any flag risks
+            # Squirrel treating it as unknown-arg and silently aborting.
+            self._debug_log(f"[Olostep] running {installer_path} (no flags — auto-install)")
             process = subprocess.run(
-                [installer_path, '--silent'],
+                [installer_path],
                 capture_output=True,
-                timeout=300  # 5 minute timeout
+                timeout=600  # 10 min — Squirrel does full UI-less install
             )
             self._debug_log(f"[Olostep] subprocess exited rc={process.returncode}")
 
@@ -5502,7 +5508,7 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
             if not olostep_exe.exists():
                 self._debug_log(
                     f"[Olostep] installer returned 0 but {olostep_exe} is missing. "
-                    "Silent flag may have been ignored."
+                    "Squirrel may have failed silently."
                 )
                 raise RuntimeError(
                     "Olostep install reported success but the browser "
