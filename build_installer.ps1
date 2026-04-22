@@ -241,6 +241,14 @@ try {
         --add-data "SDK;SDK" `
         --add-data "core;core" `
         --add-data "dist\frynetworks_updater.exe;." `
+        --exclude-module numpy `
+        --exclude-module PIL `
+        --exclude-module Pillow `
+        --exclude-module PySide6.QtQuick `
+        --exclude-module PySide6.QtQml `
+        --exclude-module PySide6.QtPdf `
+        --exclude-module PySide6.QtWebEngineWidgets `
+        --exclude-module PySide6.QtWebEngineCore `
         --name $ExeName `
         installer_main.py
     
