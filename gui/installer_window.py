@@ -5633,6 +5633,9 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                         f"[Olostep] install verified at {olostep_exe} "
                         f"(after {_attempt}s wait)"
                     )
+                    # Silent auto-accept: pre-stage config.json so Olostep's
+                    # first-run "Agree and Continue" dialog never appears.
+                    self._ensure_olostep_config()
                     break
                 _time_poll.sleep(VERIFY_POLL_INTERVAL)
 
@@ -5659,6 +5662,63 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                     os.remove(installer_path)
             except Exception:
                 pass
+
+    def _ensure_olostep_config(self) -> None:
+        """Pre-stage %APPDATA%/Olostep-Browser/config.json with
+        terms-accepted=true so the first-launch dialog never appears.
+
+        Only adds missing keys; preserves any existing user-customized
+        values. Non-fatal — if pre-staging fails the user will see the
+        dialog but installation continues normally.
+        """
+        import json
+        import os
+        import secrets
+        from pathlib import Path
+
+        try:
+            cfg_dir = Path(os.environ.get('APPDATA', '')) / 'Olostep-Browser'
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            cfg_path = cfg_dir / 'config.json'
+
+            existing = {}
+            if cfg_path.exists():
+                try:
+                    existing = json.loads(cfg_path.read_text(encoding='utf-8'))
+                    if not isinstance(existing, dict):
+                        existing = {}
+                except Exception as e:
+                    self._debug_log(
+                        f"[olostep] existing config.json unparseable, "
+                        f"replacing: {e!r}"
+                    )
+                    existing = {}
+
+            if 'mllwtl_identifier' not in existing:
+                rand = secrets.token_hex(6)[:12]
+                existing['mllwtl_identifier'] = f'mllwtl_olostepbrowser_{rand}'
+            if 'terms-accepted' not in existing:
+                existing['terms-accepted'] = True
+            if 'mellowtel_opt_in_status' not in existing:
+                existing['mellowtel_opt_in_status'] = True
+            if 'auto-start-enabled' not in existing:
+                existing['auto-start-enabled'] = True
+            if 'timestamp_m' not in existing:
+                import time as _time
+                existing['timestamp_m'] = int(_time.time() * 1000)
+            if 'count_m' not in existing:
+                existing['count_m'] = 0
+
+            cfg_path.write_text(
+                json.dumps(existing, indent=4),
+                encoding='utf-8',
+            )
+            self._debug_log(
+                f"[olostep] pre-staged config at {cfg_path} "
+                f"(terms-accepted=True)"
+            )
+        except Exception as e:
+            self._debug_log(f"[olostep] config pre-stage failed: {e!r}")
 
     def _is_olostep_running(self) -> bool:
         """Return True if an Olostep Browser process appears to be running.
