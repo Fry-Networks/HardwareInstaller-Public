@@ -323,6 +323,11 @@ def launch_gui(args):
     _slog.info("=" * 80)
     _slog.info("NEW RUN — launch_gui() entered")
     _slog.info(f"sys.argv={sys.argv}, frozen={getattr(sys, 'frozen', False)}")
+    try:
+        import pyi_splash
+        pyi_splash.update_text('Initializing...')
+    except ImportError:
+        pass
 
     try:
         # Check for GUI dependencies
@@ -450,6 +455,7 @@ def launch_gui(args):
         # Dismiss PyInstaller splash now that main window is visible
         try:
             import pyi_splash
+            pyi_splash.update_text('Starting installer...')
             pyi_splash.close()
         except ImportError:
             pass  # not a frozen PyInstaller bundle (dev mode)

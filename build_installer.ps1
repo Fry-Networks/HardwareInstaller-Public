@@ -233,7 +233,7 @@ try {
         --hidden-import "core.key_parser" `
         --collect-submodules "core" `
         --icon "resources\frynetworks_logo.ico" `
-        --splash "resources\frynetworks_logo_256.png" `
+        --splash "resources\frynetworks_splash.png" `
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
