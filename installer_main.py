@@ -447,6 +447,12 @@ def launch_gui(args):
 
         _slog.info("Calling window.show()")
         window.show()
+        # Dismiss PyInstaller splash now that main window is visible
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except ImportError:
+            pass  # not a frozen PyInstaller bundle (dev mode)
         _slog.info(f"window.show() returned — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"windowHandle={'exists' if window.windowHandle() else 'None'}")
