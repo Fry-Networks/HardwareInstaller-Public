@@ -1283,6 +1283,96 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             return False
 
+    def _find_validate_button(self):
+        """Return the QWizard Next/Validate button widget, or None."""
+        try:
+            nb = self.wizard.button(self.NEXT_BUTTON)
+            if nb is not None:
+                return nb
+        except Exception:
+            pass
+        try:
+            next_enum = getattr(QtWidgets.QWizard, 'NextButton', None)
+            if next_enum is not None:
+                nb = self.wizard.button(cast(Any, next_enum))
+                if nb is not None:
+                    return nb
+        except Exception:
+            pass
+        try:
+            for child in self.wizard.findChildren(QtWidgets.QPushButton):
+                txt = (child.text() or "").strip().lower()
+                if 'validate' in txt or 'next' in txt:
+                    return child
+        except Exception:
+            pass
+        return None
+
+    _SPINNER_FRAMES = '\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f'
+
+    def _attach_validate_spinner(self, button) -> None:
+        """Create a spinning label overlay on the Validate button."""
+        try:
+            self._detach_validate_spinner(button)
+        except Exception:
+            pass
+        if button is None:
+            return
+
+        label = QtWidgets.QLabel(button)
+        label.setObjectName('fryValidateSpinner')
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            "background: transparent; color: #1d4ed8; "
+            "font-weight: bold; font-size: 16px;"
+        )
+        label.resize(button.size())
+        label.move(0, 0)
+        label.raise_()
+        label.show()
+
+        timer = QtCore.QTimer(label)
+        frames = self._SPINNER_FRAMES
+        idx = [0]
+
+        def tick():
+            if not label or not label.parent():
+                timer.stop()
+                return
+            label.setText(frames[idx[0] % len(frames)])
+            idx[0] += 1
+
+        timer.timeout.connect(tick)
+        timer.start(80)
+        tick()
+
+        button._fry_spinner_label = label
+        button._fry_spinner_timer = timer
+
+    def _detach_validate_spinner(self, button) -> None:
+        """Tear down the spinner overlay."""
+        if button is None:
+            return
+        timer = getattr(button, '_fry_spinner_timer', None)
+        label = getattr(button, '_fry_spinner_label', None)
+        try:
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+        except Exception:
+            pass
+        try:
+            if label is not None:
+                label.hide()
+                label.deleteLater()
+        except Exception:
+            pass
+        try:
+            del button._fry_spinner_timer
+            del button._fry_spinner_label
+        except (AttributeError, Exception):
+            pass
+
     def _set_validate_button_enabled(self, enabled: bool) -> None:
         """Enable/disable the footer 'Validate Key' (Next) button robustly.
 
@@ -4389,6 +4479,14 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        # Show spinner overlay during the ~1.5-2s API round-trip
+        try:
+            btn = self._find_validate_button()
+            if btn is not None:
+                self._attach_validate_spinner(btn)
+        except Exception:
+            pass
+
         # Launch the network-heavy work on a background thread
         self._start_validation_thread(key, result)
 
@@ -4448,6 +4546,14 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
     def _on_validation_done(self, result: dict):
         """Handle validation result on the main thread (signal handler)."""
         self._validation_thread = None
+
+        # Remove spinner overlay (before any early returns)
+        try:
+            btn = self._find_validate_button()
+            if btn is not None:
+                self._detach_validate_spinner(btn)
+        except Exception:
+            pass
 
         # Re-enable refresh button if it exists
         try:
