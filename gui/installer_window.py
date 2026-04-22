@@ -5502,22 +5502,37 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                 )
                 raise RuntimeError(f"Installer exited with code {process.returncode}")
 
-            # Post-install verification: Squirrel reports success via exit code
-            # regardless of whether the silent flag was honored.  Confirm the
-            # expected executable exists on disk.
-            if not olostep_exe.exists():
+            # setup.exe is a Squirrel bootstrapper — it exits rc=0 immediately
+            # after spawning the real Squirrel updater as a child process. The
+            # child takes 4-7 seconds to lay down files at the canonical path.
+            # Poll for the exe to appear with a bounded foreground wait so we
+            # don't race ahead of Squirrel's async teardown.
+            import time as _time_poll
+            VERIFY_TIMEOUT_SECONDS = 30
+            VERIFY_POLL_INTERVAL = 1
+            verified = False
+            for _attempt in range(VERIFY_TIMEOUT_SECONDS):
+                if olostep_exe.exists():
+                    verified = True
+                    self._debug_log(
+                        f"[Olostep] install verified at {olostep_exe} "
+                        f"(after {_attempt}s wait)"
+                    )
+                    break
+                _time_poll.sleep(VERIFY_POLL_INTERVAL)
+
+            if not verified:
                 self._debug_log(
-                    f"[Olostep] installer returned 0 but {olostep_exe} is missing. "
-                    "Squirrel may have failed silently."
+                    f"[Olostep] installer returned 0 but {olostep_exe} is missing "
+                    f"after {VERIFY_TIMEOUT_SECONDS}s wait. Squirrel install failed."
                 )
                 raise RuntimeError(
                     "Olostep install reported success but the browser "
-                    f"executable is missing at {olostep_exe}. Please install "
-                    "Olostep Browser manually from "
+                    f"executable never appeared at {olostep_exe} after "
+                    f"{VERIFY_TIMEOUT_SECONDS}s. Please install Olostep Browser "
+                    "manually from "
                     "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe"
                 )
-
-            self._debug_log(f"[Olostep] install verified at {olostep_exe}")
             _log("Olostep Browser installed successfully")
 
         except Exception as e:
