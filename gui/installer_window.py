@@ -3803,6 +3803,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         progress.setMinimumDuration(0)
         progress.show()
 
+        stage_observed = {'downloading': False, 'launching': False}
+
         proc = QtCore.QProcess(self)
         proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
 
@@ -3821,19 +3823,28 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             low = chunk.lower()
             if "downloading" in low:
                 progress.setLabelText("Downloading update...")
-            elif "launching" in low:
+                stage_observed['downloading'] = True
+            elif "launching" in low or "starting installer" in low or "running installer" in low:
                 progress.setLabelText("Launching installer...")
-            elif "checking" in low:
+                stage_observed['launching'] = True
+            elif "checking" in low or "querying" in low or "fetching release" in low:
                 progress.setLabelText("Checking for updates...")
 
         def _on_finished(exit_code, _exit_status):
             progress.close()
             if exit_code == 0:
-                QtWidgets.QMessageBox.information(
-                    self, "Check for Updates",
-                    "Update check complete. If a newer version was available, "
-                    "the installer has been launched."
-                )
+                if stage_observed['downloading'] or stage_observed['launching']:
+                    QtWidgets.QMessageBox.information(
+                        self, "Check for Updates",
+                        "An update has been downloaded and the new installer "
+                        "has been launched."
+                    )
+                else:
+                    QtWidgets.QMessageBox.information(
+                        self, "Check for Updates",
+                        f"You are already running the latest version of "
+                        f"Fry Networks Installer (v{WINDOWS_VERSION})."
+                    )
             else:
                 QtWidgets.QMessageBox.warning(
                     self, "Check for Updates",
