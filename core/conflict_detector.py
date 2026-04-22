@@ -23,6 +23,8 @@ from typing import Dict, List, Any
 from .key_parser import MinerKeyParser
 from . import naming
 
+_NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
+
 # Import external API client from the tools package
 from tools.external_api import ExternalApiClient, ApiError
 
@@ -399,7 +401,8 @@ class ConflictDetector:
                 try:
                     wmi_cmd = ["powershell", "-NoLogo", "-WindowStyle", "Hidden", "-NoProfile", "-Command",
                                "Get-CimInstance Win32_ComputerSystem | Select Manufacturer,Model"]
-                    r = subprocess.run(wmi_cmd, capture_output=True, text=True, timeout=5)
+                    r = subprocess.run(wmi_cmd, capture_output=True, text=True, timeout=5,
+                                       creationflags=_NO_WINDOW_FLAGS)
                     out = (r.stdout + r.stderr).lower()
                     if any(m in out for m in vm_markers):
                         info["vm"] = True
@@ -411,7 +414,8 @@ class ConflictDetector:
                 # BIOS vendor / product via wmic (fallback)
                 try:
                     r = subprocess.run(["wmic", "computersystem", "get", "manufacturer,model"],
-                                        capture_output=True, text=True, timeout=5)
+                                        capture_output=True, text=True, timeout=5,
+                                        creationflags=_NO_WINDOW_FLAGS)
                     out = (r.stdout + r.stderr).lower()
                     if any(m in out for m in vm_markers):
                         info["vm"] = True
