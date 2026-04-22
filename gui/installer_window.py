@@ -5377,7 +5377,10 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
         import tempfile
         import subprocess
         import urllib.request
+        import urllib.error
         from pathlib import Path
+
+        self._debug_log("[Olostep] _install_olostep_browser entered")
 
         def _status(msg: str) -> None:
             if progress_cb:
@@ -5401,17 +5404,16 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                     pass
             _status(msg)
 
-        # Check if Olostep Browser is already installed
-        # Common installation paths for Windows browsers
-        possible_paths = [
-            Path(os.environ.get('PROGRAMFILES', 'C:\\Program Files')) / 'Olostep Browser' / 'Olostep Browser.exe',
-            Path(os.environ.get('PROGRAMFILES(X86)', 'C:\\Program Files (x86)')) / 'Olostep Browser' / 'Olostep Browser.exe',
-            Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'Olostep Browser' / 'Olostep Browser.exe',
-            Path.home() / 'AppData' / 'Local' / 'Olostep Browser' / 'Olostep Browser.exe',
-        ]
-        
+        # Olostep uses a Squirrel installer framework.  Squirrel always
+        # lands at %LOCALAPPDATA%\Olostep-Browser\OlostepBrowser.exe.
+        # Legacy paths (Program Files, Programs subfolder, space-in-name)
+        # were wrong for Squirrel and are removed.
+        olostep_exe = Path(os.environ.get('LOCALAPPDATA', '')) / 'Olostep-Browser' / 'OlostepBrowser.exe'
+        possible_paths = [olostep_exe]
+
         for path in possible_paths:
             if path.exists():
+                self._debug_log(f"[Olostep] already installed at {path}")
                 _status("Olostep Browser is already installed")
                 return  # Already installed, skip installation
 
@@ -5419,40 +5421,88 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
         # non-standard location), skip the download/install step.
         try:
             if self._is_olostep_running():
+                self._debug_log("[Olostep] process already running, skipping install")
                 _status("Olostep Browser is already running")
                 return
         except Exception:
             # If the running-check fails, continue with install attempt
             pass
-        
+
         # Get URL from environment/config
         olostep_url = os.getenv('OLOSTEP_BROWSER_URL',
                                 'https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe')
-        
+
         _status("Downloading Olostep Browser...")
-        
+
         # Download to temp file
         temp_dir = tempfile.gettempdir()
         installer_path = os.path.join(temp_dir, 'Olostep-Browser-Setup.exe')
-        
+
         try:
-            # Download with progress feedback
-            urllib.request.urlretrieve(olostep_url, installer_path)
+            # Download with retry
+            MAX_DOWNLOAD_ATTEMPTS = 2
+            last_err = None
+            for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+                try:
+                    self._debug_log(
+                        f"[Olostep] downloading (attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS}) "
+                        f"from {olostep_url}"
+                    )
+                    urllib.request.urlretrieve(olostep_url, installer_path)
+                    self._debug_log(
+                        f"[Olostep] download complete, size={os.path.getsize(installer_path)}"
+                    )
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError) as e:
+                    last_err = e
+                    self._debug_log(f"[Olostep] download attempt {attempt} failed: {e!r}")
+                    if attempt < MAX_DOWNLOAD_ATTEMPTS:
+                        time.sleep(3)
+            else:
+                raise RuntimeError(
+                    f"Could not download Olostep installer after "
+                    f"{MAX_DOWNLOAD_ATTEMPTS} attempts: {last_err!r}. "
+                    "Please download manually from "
+                    "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe"
+                )
+
             _status("Installing Olostep Browser...")
-            
-            # Run installer silently
-            # Most installers support /S or /SILENT flags
+
+            # Run installer silently (Squirrel uses --silent, not NSIS /S)
+            self._debug_log(f"[Olostep] running {installer_path} --silent")
             process = subprocess.run(
-                [installer_path, '/S'],  # Silent install flag
+                [installer_path, '--silent'],
                 capture_output=True,
                 timeout=300  # 5 minute timeout
             )
-            
+            self._debug_log(f"[Olostep] subprocess exited rc={process.returncode}")
+
             if process.returncode != 0:
+                stderr_snippet = (process.stderr or b'').decode('utf-8', errors='replace')[:500]
+                self._debug_log(
+                    f"[Olostep] installer returned non-zero: rc={process.returncode} "
+                    f"stderr={stderr_snippet!r}"
+                )
                 raise RuntimeError(f"Installer exited with code {process.returncode}")
-            
+
+            # Post-install verification: Squirrel reports success via exit code
+            # regardless of whether the silent flag was honored.  Confirm the
+            # expected executable exists on disk.
+            if not olostep_exe.exists():
+                self._debug_log(
+                    f"[Olostep] installer returned 0 but {olostep_exe} is missing. "
+                    "Silent flag may have been ignored."
+                )
+                raise RuntimeError(
+                    "Olostep install reported success but the browser "
+                    f"executable is missing at {olostep_exe}. Please install "
+                    "Olostep Browser manually from "
+                    "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe"
+                )
+
+            self._debug_log(f"[Olostep] install verified at {olostep_exe}")
             _log("Olostep Browser installed successfully")
-            
+
         except Exception as e:
             raise RuntimeError(f"Failed to download or install Olostep Browser: {str(e)}")
         finally:
