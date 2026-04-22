@@ -1100,7 +1100,17 @@ class WindowsServiceManager:
             # Configure service options (logging, rotation, etc.)
             self._configure_service_options(**options)
             result["actions"].append("Configured service options")
-            
+
+            # Firewall: ensure Allow rules so the Windows Security Alert
+            # popup never appears for this miner's binaries.
+            try:
+                from core.firewall_manager import FirewallManager
+                fwm = FirewallManager(debug_log=print)
+                fwm.add_miner_rules(self.miner_code, self.base_dir)
+                result["actions"].append("Added firewall rules for miner binaries")
+            except Exception as e:
+                result["errors"].append(f"Warning: Could not add firewall rules: {e}")
+
             # Provision Mysterium partner integration for BM installs
             try:
                 partner_actions = _prepare_partner_integrations(self.miner_code, self.base_dir, options, sys.platform)
@@ -1631,7 +1641,16 @@ class WindowsServiceManager:
                         print(f"⚠ Service {self.service_name} still exists with status: {verify_status}")
             except Exception as e:
                 result["errors"].append(f"Warning: Could not remove service registration - {str(e)}")
-            
+
+            # Firewall: remove Allow rules for this miner's binaries.
+            try:
+                from core.firewall_manager import FirewallManager
+                fwm = FirewallManager(debug_log=print)
+                fwm.remove_miner_rules(self.miner_code)
+                result["actions"].append("Removed firewall rules for miner binaries")
+            except Exception as e:
+                result["errors"].append(f"Warning: Could not remove firewall rules: {e}")
+
             if not preserve_gui_processes:
                 # Step 3: Close any GUI windows for this miner
                 try:

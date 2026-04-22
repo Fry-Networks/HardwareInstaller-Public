@@ -268,6 +268,15 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+        # Best-effort sweep: ensure firewall rules for all installed miners
+        try:
+            self._ensure_firewall_rules()
+        except Exception as e:
+            try:
+                self._slog.warning(f"firewall rule sweep failed (best-effort): {e}")
+            except Exception:
+                pass
+
     def _debug_log(self, message: str) -> None:
         """Best-effort append-only debug logger for installer events."""
         try:
@@ -6171,6 +6180,40 @@ foreach ($loc in $locations) {{
                 )
         except Exception:
             pass
+
+    def _ensure_firewall_rules(self) -> None:
+        """Sweep installed miners + Olostep + updater and ensure firewall rules exist.
+
+        Runs at installer startup as a catch-up for:
+          - Users upgrading from v4.0.13 (no rules existed at install time)
+          - Crashed-mid-install recovery (missed the install-time rule-add)
+          - Users who manually deleted a rule
+        """
+        from core.firewall_manager import FirewallManager
+        from core.key_parser import MINER_TYPES
+        from pathlib import Path
+
+        self._debug_log("[firewall] startup sweep entered")
+        fwm = FirewallManager(debug_log=self._debug_log)
+
+        program_data = Path(r'C:\ProgramData\FryNetworks')
+        if program_data.exists():
+            for miner_code in MINER_TYPES:
+                miner_dir = program_data / f'miner-{miner_code}'
+                if miner_dir.exists():
+                    fwm.add_miner_rules(miner_code, miner_dir)
+
+        fwm.ensure_olostep_rule()
+        fwm.ensure_updater_rule()
+
+        # Rule for the installer EXE itself (only from stable ProgramData path)
+        import sys
+        installer_exe = Path(sys.executable)
+        if 'frynetworks_installer' in installer_exe.name.lower() \
+           and str(installer_exe).lower().startswith(str(program_data).lower()):
+            fwm.add_rule("FryNetworks Installer", installer_exe)
+
+        self._debug_log("[firewall] startup sweep complete")
 
     @QtCore.Slot(int, str)
     def _update_progress_main_thread(self, value: int, message: str):
