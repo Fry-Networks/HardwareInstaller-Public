@@ -57,7 +57,7 @@ def main():
     load_env()
     
     parser = argparse.ArgumentParser(
-        description="FryNetworks Miner Installer",
+        description="Fry Networks Miner Installer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -72,7 +72,7 @@ Examples:
     # Global options
     parser.add_argument('--gui', action='store_true',
                        help='Launch graphical installer interface')
-    parser.add_argument('--version', action='version', version='FryNetworks Installer 1.0.0')
+    parser.add_argument('--version', action='version', version='Fry Networks Installer 1.0.0')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose output')
     
@@ -297,7 +297,7 @@ def _self_downgrade_check():
     msg.setIcon(QtWidgets.QMessageBox.Icon.Critical)
     msg.setWindowTitle("Cannot Install Older Version")
     msg.setText(
-        f"Cannot install FryNetworks Installer v{embedded}.\n\n"
+        f"Cannot install Fry Networks Installer v{embedded}.\n\n"
         f"A newer version (v{installed}) is already installed.\n"
         "Please use your currently installed version or download\n"
         "the latest release from:\n"

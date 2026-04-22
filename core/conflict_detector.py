@@ -162,7 +162,7 @@ class ConflictDetector:
                     "severity": "error",
                     "message": "Installation forbidden: Virtual Machine environment detected",
                     "evidence": vm_info.get("evidence", []),
-                    "resolution": "Install on physical hardware. VMs are not supported for FryNetworks miners."
+                    "resolution": "Install on physical hardware. VMs are not supported for Fry Networks miners."
                 })
                 # Early return: VM usage is a hard stop regardless of other checks
                 return conflicts
