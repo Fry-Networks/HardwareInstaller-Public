@@ -89,6 +89,23 @@ class _WelcomeDataWorker(QtCore.QThread):
             self.finished.emit(None)
 
 
+class _FirewallSweepWorker(QtCore.QThread):
+    """Runs the startup firewall sweep off the main UI thread."""
+    finished = QtCore.Signal()
+    error = QtCore.Signal(str)
+
+    def __init__(self, sweep_callable: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self._sweep = sweep_callable
+
+    def run(self):
+        try:
+            self._sweep()
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
     """Main installer window with FryNetworks branding."""
     # Signals for thread-safe UI invocation from worker threads
@@ -164,6 +181,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Track when an installation has completed so Finish button closes instead of reinstalling
         self._post_install_mode: bool = False
         self._last_install_ctx: Optional[Dict[str, Any]] = None
+        self._firewall_sweep_started: bool = False
+        self._firewall_worker: Optional[_FirewallSweepWorker] = None
         self._browsers_running_at_install: list = []
 
         # Track whether the progress log has been seeded for the current run (kept for safety)
@@ -267,15 +286,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception as e:
             try:
                 self._slog.warning(f"legacy companion cleanup failed (best-effort): {e}")
-            except Exception:
-                pass
-
-        # Best-effort sweep: ensure firewall rules for all installed miners
-        try:
-            self._ensure_firewall_rules()
-        except Exception as e:
-            try:
-                self._slog.warning(f"firewall rule sweep failed (best-effort): {e}")
             except Exception:
                 pass
 
@@ -4008,6 +4018,24 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick,
             ):
                 self._restore_from_tray()
+        except Exception:
+            pass
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        """Start the background firewall sweep once the window becomes visible."""
+        super().showEvent(event)
+        if self._firewall_sweep_started:
+            return
+        self._firewall_sweep_started = True
+        self._firewall_worker = _FirewallSweepWorker(self._ensure_firewall_rules, parent=self)
+        self._firewall_worker.finished.connect(self._firewall_worker.deleteLater)
+        self._firewall_worker.error.connect(self._on_firewall_sweep_error)
+        self._firewall_worker.start()
+
+    def _on_firewall_sweep_error(self, message: str) -> None:
+        """Marshal firewall sweep errors back to the UI thread safely."""
+        try:
+            self._slog.warning(f"firewall rule sweep failed (best-effort): {message}")
         except Exception:
             pass
 
