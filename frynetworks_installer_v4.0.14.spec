@@ -14,7 +14,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['numpy', 'PIL', 'Pillow', 'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtPdf', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
     noarchive=False,
     optimize=0,
 )
@@ -23,7 +23,7 @@ splash = Splash(
     'resources\\frynetworks_splash.png',
     binaries=a.binaries,
     datas=a.datas,
-    text_pos='bottom-left',
+    text_pos=None,
     text_size=12,
     minify_script=True,
     always_on_top=True,
