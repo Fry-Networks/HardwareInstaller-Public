@@ -5389,11 +5389,11 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                             updater_path_escaped = str(updater_dest).replace("'", "''")
 
                             register_cmd = f'''
-$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --current-version {current_ver}' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
+$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --current-version {current_ver} --update-poc' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
 $triggerDaily = New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
-Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Limited -Force | Out-Null
+Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Highest -Force | Out-Null
 '''
                             subprocess.run(
                                 ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
