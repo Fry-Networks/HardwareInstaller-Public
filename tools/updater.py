@@ -463,6 +463,9 @@ def main() -> int:
         current_version = discover_installer_version(args.current_version, log_file)
         if not current_version:
             print("CANNOT_DETERMINE_INSTALLER_VERSION")
+            if args.update_poc:
+                write_log("Installer version unknown; proceeding with PoC update only.", log_file)
+                return run_poc_updates(args, log_file)
             return 2
         write_log(f"Current version: {current_version}", log_file)
         print(f"Checking for updates... (current: {current_version})")
@@ -479,6 +482,8 @@ def main() -> int:
                 log_file,
             )
             print("Could not determine remote version.")
+            if args.update_poc:
+                return run_poc_updates(args, log_file)
             return 1
 
         cmp = compare_versions(remote_ver, current_version)
@@ -496,11 +501,15 @@ def main() -> int:
         installer_asset = find_installer_asset(release)
         if not installer_asset:
             write_log("No installer asset found in latest release.", log_file)
+            if args.update_poc:
+                return run_poc_updates(args, log_file)
             return 1
 
         msi_url = installer_asset.get("browser_download_url")
         if not msi_url:
             write_log("Installer asset missing download URL.", log_file)
+            if args.update_poc:
+                return run_poc_updates(args, log_file)
             return 1
         msi_name = installer_asset.get("name", "update.exe")
         dest = Path(tempfile.gettempdir()) / msi_name
@@ -531,6 +540,8 @@ def main() -> int:
                 actual = sha256_file(dest)
                 if expected.lower() != actual.lower():
                     write_log(f"Checksum mismatch: expected {expected}, got {actual}", log_file)
+                    if args.update_poc:
+                        return run_poc_updates(args, log_file)
                     return 1
             write_log("Checksum verified.", log_file)
 
