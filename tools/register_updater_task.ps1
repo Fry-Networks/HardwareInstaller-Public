@@ -45,14 +45,14 @@ try {
             -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"& { \$env:GITHUB_TOKEN = '$GitHubToken'; & '$UpdaterPath' --quiet }`"" `
             -WorkingDirectory (Split-Path $UpdaterPath)
     } else {
-        $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--quiet" -WorkingDirectory (Split-Path $UpdaterPath)
+        $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--quiet --update-poc" -WorkingDirectory (Split-Path $UpdaterPath)
     }
     $triggers = @(
         New-ScheduledTaskTrigger -AtLogOn
         New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
     )
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
     $taskPath = "\FryNetworks\"
 
     $existing = Get-ScheduledTask -TaskName $TaskName -TaskPath $taskPath -ErrorAction SilentlyContinue
