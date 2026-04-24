@@ -255,10 +255,23 @@ def update_poc_service(
     new_exe_path = install_root / f"FRY_PoC_{miner_code}_v{new_version}.exe"
 
     # 1. Stop
-    subprocess.run(
+    result = subprocess.run(
         [nssm, "stop", old_service],
-        check=True, capture_output=True, timeout=30,
+        check=False, capture_output=True, timeout=30,
     )
+    time.sleep(2)  # Allow SCM to finalize state
+    # Verify service actually stopped (nssm returns 1 on kill-path stop)
+    status = subprocess.run(
+        [nssm, "status", old_service],
+        capture_output=True, timeout=10,
+    )
+    # nssm status output is UTF-16 LE
+    svc_state = status.stdout.decode("utf-16-le", errors="ignore").strip()
+    if "STOPPED" not in svc_state and "SERVICE_STOPPED" not in svc_state:
+        raise RuntimeError(
+            f"Service {old_service} failed to stop "
+            f"(nssm stop rc={result.returncode}, status={svc_state!r})"
+        )
     write_log(f"STOPPED: {old_service}", log_file)
 
     # 2. Remove
