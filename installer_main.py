@@ -508,7 +508,7 @@ from core.service_manager import ServiceManager
 from core.config_manager import ConfigManager
 
 # Import external API client from tools package
-from tools.external_api import ExternalApiClient, _BUILD_CONFIG
+from tools.external_api import ExternalApiClient, _BUILD_CONFIG, get_external_api_client
 
 
 def load_env():
@@ -729,9 +729,8 @@ def install_miner(args):
     # Public build: Mysterium is the sole partner integration (mandatory for BM)
 
     # Check for conflicts with External API
-    api_base_url = get_api_base_url()
-    api_client = ExternalApiClient(api_base_url)
-    print(f"✓ External API connected: {api_base_url}")
+    api_client = get_external_api_client()
+    print(f"✓ External API connected: {api_client.base_url}")
     
     detector = ConflictDetector(api_client=api_client)
     conflicts = detector.check_device_conflicts(args.key)
@@ -873,8 +872,7 @@ def handle_validate(args):
     
     # Validate with External API
     try:
-        api_base_url = get_api_base_url()
-        api_client = ExternalApiClient(api_base_url)
+        api_client = get_external_api_client()
         
         print(f"\\n🔍 Validating with External API...")
         miner_profile = api_client.get_miner_profile(args.key)
