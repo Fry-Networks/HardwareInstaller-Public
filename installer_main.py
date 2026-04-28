@@ -501,6 +501,7 @@ def launch_gui(args):
 
 def handle_install(args):
     """Handle installation command."""
+    return install_miner(args)
 from core.key_parser import MinerKeyParser
 from core.conflict_detector import ConflictDetector
 from core.service_manager import ServiceManager
