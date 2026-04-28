@@ -40,6 +40,11 @@ from tools.banner import TopBanner
 from tools.external_api import get_external_api_client, ExternalApiClient, _BUILD_CONFIG
 from version import __version__ as version_str
 
+# Track 3: Mysterium TOS gate + install-time provisioning
+from gui.mysterium_tos_dialog import show_mysterium_consent_dialog
+from core.tos_state import write_tos_state, read_tos_state, is_resolved_accept
+from core.mysterium_provisioning import provision_mysterium_at_install, cleanup_mysterium_on_failure
+
 _NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
 
 
@@ -725,6 +730,17 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return "auto"
+
+    def _resolve_tos_config_dir(self):
+        """Resolve config dir for tos_state.json at any point in install flow."""
+        try:
+            if self.current_miner_info:
+                code = self.current_miner_info.get("code", "BM")
+                return ConfigManager(code).get_installation_directory(True) / "config"
+        except Exception:
+            pass
+        return None
+
     def _maybe_show_welcome(self) -> None:
         """Show welcome screen immediately with a loading placeholder, then
         fetch miner availability data from the API in a background thread."""
@@ -4892,6 +4908,33 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 return
             install_olostep = True
 
+        # Mysterium TOS gate (BM only)
+        accept_mysterium = False
+        if self.current_miner_info and self.current_miner_info.get("code") == "BM":
+            if getattr(self, '_quiet_mode', False):
+                # --quiet (updater) — skip dialog, defer to GUI catch-up
+                # But don't regress existing accepted state
+                tos_dir = self._resolve_tos_config_dir()
+                if tos_dir:
+                    existing = read_tos_state(tos_dir)
+                    if is_resolved_accept(existing):
+                        accept_mysterium = True  # honor prior acceptance
+                    else:
+                        write_tos_state(tos_dir, accepted_via="installer-quiet-deferred",
+                                        tos_pending_catchup=True)
+                        accept_mysterium = False
+                else:
+                    accept_mysterium = False
+            elif show_mysterium_consent_dialog(self, self._get_screen_size_pref()):
+                accept_mysterium = True
+            else:
+                self.status_bar.setText(
+                    "Mysterium TOS declined \u2014 installing without bandwidth sharing"
+                )
+                tos_dir = self._resolve_tos_config_dir()
+                if tos_dir:
+                    write_tos_state(tos_dir, accepted_via="installer-declined")
+
         # Hide the Installation Summary to give more room for progress
         try:
             if hasattr(self, "review_label"):
@@ -4930,12 +4973,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             if 0 <= idx < len(self._screen_size_choices):
                 options["screen_size"] = self._screen_size_choices[idx][1]
 
-        # Partner integrations (BM only) — public build: Mysterium only, mandatory
+        # Partner integrations (BM only) — gated by TOS consent (Track 3)
         if miner_info.get("code") == "BM":
-            options["mysterium_opt_in"] = True
-            options["_stage_partner_sdks"] = {
-                "mysterium": True,
-            }
+            options["mysterium_opt_in"] = accept_mysterium
+            options["_stage_partner_sdks"] = {"mysterium": True} if accept_mysterium else {}
         else:
             options["mysterium_opt_in"] = False
 
@@ -5266,6 +5307,67 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         for action in actions:
                             if isinstance(action, str) and action.startswith("Download attempts:"):
                                 self.log_progress(f"   • {action[len('Download attempts:'):].strip()}")
+
+                # ---- Mysterium install-time provisioning (BM only, Track 3) ----
+                if options.get("mysterium_opt_in") and miner_info.get("code") == "BM" and not getattr(self, '_quiet_mode', False):
+                    self.log_progress("")
+                    self.log_progress("Provisioning Mysterium Network integration...")
+                    self.update_progress(72, "Provisioning Mysterium...")
+
+                    resolved_dir = Path(
+                        install_result.get("install_dir") or install_result.get("install_path")
+                        or options.get("_resolved_install_dir") or options.get("install_dir")
+                    )
+                    _nssm = resolved_dir / "nssm.exe"
+                    _myst = resolved_dir / "SDK" / "windows-myst-sdk" / "myst.exe"
+                    _data = resolved_dir / "myst-data"
+
+                    _pc = (_BUILD_CONFIG or {}).get("partner_integrations", {}).get("mysterium", {})
+                    _payout = _pc.get("payout_addr") or _pc.get("payout")
+                    _reg = _pc.get("reg_token")
+                    _api = _pc.get("api_key")
+
+                    if not (_payout and _reg and _api and _myst.exists() and _nssm.exists()):
+                        self.log_progress("[error] Mysterium: missing credentials or binaries")
+                        self.installation_failed(
+                            "Mysterium provisioning failed",
+                            ["Required credentials or binaries not found. BM install aborted."],
+                        )
+                        return
+
+                    def _prov_cb(msg: str) -> None:
+                        self.log_progress(f"   {msg}")
+                        self.update_progress(72, msg)
+
+                    prov_result = provision_mysterium_at_install(
+                        base_dir=resolved_dir,
+                        nssm_path=_nssm,
+                        myst_bin=_myst,
+                        data_dir=_data,
+                        payout_addr=_payout,
+                        reg_token=_reg,
+                        api_key=_api,
+                        progress_callback=_prov_cb,
+                    )
+
+                    if prov_result.success:
+                        tos_dir = self._resolve_tos_config_dir()
+                        if tos_dir:
+                            write_tos_state(tos_dir, accepted_via="installer-interactive")
+                        self.log_progress("Mysterium provisioning complete \u2713")
+                    else:
+                        self.log_progress(
+                            f"[error] Mysterium: {prov_result.failed_step}: {prov_result.error}"
+                        )
+                        cleanup_mysterium_on_failure(resolved_dir, _nssm)
+                        self.installation_failed(
+                            "Mysterium Provisioning Failed",
+                            [
+                                f"Step '{prov_result.failed_step}' failed: {prov_result.error}",
+                                "BM install aborted. You may retry.",
+                            ],
+                        )
+                        return
 
                 # Determine next step number based on whether PoC version was different
                 next_step = 8 if (poc_version and poc_version != desired_version) else 7

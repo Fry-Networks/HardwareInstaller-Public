@@ -75,6 +75,8 @@ Examples:
     parser.add_argument('--version', action='version', version='Fry Networks Installer 1.0.0')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose output')
+    parser.add_argument('--quiet', action='store_true',
+                       help='Suppress dialogs; used by updater for silent upgrade')
     
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -93,6 +95,10 @@ Examples:
                               help='Configure service to start automatically')
     install_parser.add_argument('--resolve-conflicts', choices=['replace', 'abort', 'force'],
                               default='abort', help='How to handle conflicts')
+    install_parser.add_argument('--accept-mysterium-tos', action='store_true',
+                              help='Accept Mysterium Network TOS for BM headless installs')
+    install_parser.add_argument('--quiet', action='store_true',
+                              help='Suppress dialogs; defer TOS to GUI catch-up')
     
     # Validate command  
     validate_parser = subparsers.add_parser('validate', help='Validate a miner key')
@@ -423,7 +429,8 @@ def launch_gui(args):
 
         _slog.info("About to create FryNetworksInstallerWindow")
         window = FryNetworksInstallerWindow()
-        _slog.info("FryNetworksInstallerWindow created successfully")
+        window._quiet_mode = getattr(args, 'quiet', False)
+        _slog.info("FryNetworksInstallerWindow created successfully (quiet=%s)", window._quiet_mode)
         
         # Connect the local server to handle quit requests from new instances
         def handle_new_connection():
@@ -799,6 +806,16 @@ def install_miner(args):
         # TODO: Implement dependency installation
         print("Dependency installation not yet implemented")
     
+    # Mysterium TOS handling (Track 3)
+    accept_tos = getattr(args, 'accept_mysterium_tos', False)
+    quiet = getattr(args, 'quiet', False)
+    if is_bandwidth_miner and quiet and not accept_tos:
+        mysterium_opt_in = False  # defer to GUI catch-up
+    elif is_bandwidth_miner and accept_tos:
+        mysterium_opt_in = True
+    else:
+        mysterium_opt_in = False  # non-BM always False
+
     # Install service
     print("\\nInstalling service...")
     service_manager = ServiceManager(key_info["code"])
@@ -806,13 +823,28 @@ def install_miner(args):
         args.key,
         auto_start=args.auto_start,
         system_wide=args.system_wide,
-        mysterium_opt_in=is_bandwidth_miner,
+        mysterium_opt_in=mysterium_opt_in,
     )
-    
+
     if install_result["success"]:
         print(f"✓ {install_result['message']}")
         for action in install_result.get("actions", []):
             print(f"  • {action}")
+
+        # Write tos_state.json (Track 3) — read-before-write to preserve existing acceptance
+        if is_bandwidth_miner:
+            from core.tos_state import write_tos_state, read_tos_state, is_resolved_accept
+            config_dir = config_manager.get_installation_directory(
+                getattr(args, 'system_wide', False)
+            ) / "config"
+            if quiet and not accept_tos:
+                existing = read_tos_state(config_dir)
+                if not is_resolved_accept(existing):
+                    write_tos_state(config_dir, accepted_via="installer-quiet-deferred",
+                                    tos_pending_catchup=True)
+            elif accept_tos:
+                write_tos_state(config_dir, accepted_via="installer-interactive")
+
         return 0
     else:
         print(f"✗ {install_result['message']}")
