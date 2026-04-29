@@ -1,0 +1,2 @@
+-rwxr-xr-x 1 saf70 197121 51998720 Apr 26 14:28 /c/ProgramData/FryNetworks/miner-BM/SDK/windows-myst-sdk/myst.exe
+EXIT=0

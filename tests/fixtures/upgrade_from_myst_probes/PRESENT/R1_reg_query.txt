@@ -1,0 +1,13 @@
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\MysteriumNode
+    Type    REG_DWORD    0x10
+    Start    REG_DWORD    0x3
+    ErrorControl    REG_DWORD    0x1
+    ImagePath    REG_EXPAND_SZ    C:\ProgramData\FryNetworks\miner-BM\nssm.exe
+    DisplayName    REG_SZ    MysteriumNode
+    ObjectName    REG_SZ    LocalSystem
+    DelayedAutostart    REG_DWORD    0x0
+    FailureActionsOnNonCrashFailures    REG_DWORD    0x1
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\MysteriumNode\Parameters
+EXIT=0

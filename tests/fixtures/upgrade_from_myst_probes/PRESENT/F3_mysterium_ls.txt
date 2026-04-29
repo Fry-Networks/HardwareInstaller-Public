@@ -1,0 +1,10 @@
+total 19
+drwxr-xr-x 1 saf70 197121   0 Apr 28 03:25 .
+drwxr-xr-x 1 saf70 197121   0 Apr 28 01:43 ..
+-rw-r--r-- 1 saf70 197121 420 Apr 28 03:25 cached_status.json
+-rw-r--r-- 1 saf70 197121 212 Apr 28 02:15 config-mainnet.toml
+drwxr-xr-x 1 saf70 197121   0 Apr 26 17:50 keystore
+drwxr-xr-x 1 saf70 197121   0 Apr 27 22:46 logs
+drwxr-xr-x 1 saf70 197121   0 Apr 26 17:50 mainnet
+-rw-r--r-- 1 saf70 197121  10 Apr 26 17:50 myst_registered.flag
+EXIT=0
