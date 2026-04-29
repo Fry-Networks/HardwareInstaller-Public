@@ -156,7 +156,7 @@ $BuildConfig = @{
         sdk = @{ salt = $EncSdkSalt; password = $EncSdkPassword }
     };
     partner_integrations = @{
-        mysterium = @{
+        mystnodes_sdk = @{
             enabled = $true;
             payout_addr = $MysteriumPayout;
             reg_token = $MysteriumReg;

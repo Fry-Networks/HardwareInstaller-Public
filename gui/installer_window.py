@@ -43,7 +43,7 @@ from version import __version__ as version_str
 # Track 3: Mysterium TOS gate + install-time provisioning
 from gui.mysterium_tos_dialog import show_mysterium_consent_dialog
 from core.tos_state import write_tos_state, read_tos_state, is_resolved_accept
-from core.mysterium_provisioning import provision_mysterium_at_install, cleanup_mysterium_on_failure
+from core.mystnodes_sdk_provisioning import provision_mystnodes_sdk_at_install, cleanup_mystnodes_sdk_on_failure
 
 _NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
 
@@ -2205,7 +2205,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     # is inherited (cmd start / ShellExecuteEx drop process env vars
                     # for GUI-subsystem executables).
                     ps_cmd = (
-                        f"$env:BM_SHARING_MODE='mysterium'; "
+                        f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                         f"Start-Process '{gui_exe}' -WorkingDirectory '{install_dir}'"
                     )
                     subprocess.Popen(
@@ -4975,10 +4975,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
 
         # Partner integrations (BM only) — gated by TOS consent (Track 3)
         if miner_info.get("code") == "BM":
-            options["mysterium_opt_in"] = accept_mysterium
-            options["_stage_partner_sdks"] = {"mysterium": True} if accept_mysterium else {}
+            options["sdk_opt_in"] = accept_mysterium
+            options["_stage_partner_sdks"] = {"mystnodes_sdk": True} if accept_mysterium else {}
         else:
-            options["mysterium_opt_in"] = False
+            options["sdk_opt_in"] = False
 
         # Conflict resolution strategy - simplified: always retry with new key
         options["resolve_conflicts"] = "retry_key"
@@ -5308,45 +5308,33 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                             if isinstance(action, str) and action.startswith("Download attempts:"):
                                 self.log_progress(f"   • {action[len('Download attempts:'):].strip()}")
 
-                # ---- Mysterium install-time provisioning (BM only, Track 3) ----
-                if options.get("mysterium_opt_in") and miner_info.get("code") == "BM" and not getattr(self, '_quiet_mode', False):
+                # ---- MystNodes SDK install-time provisioning (BM only, Track 4) ----
+                if options.get("sdk_opt_in") and miner_info.get("code") == "BM" and not getattr(self, '_quiet_mode', False):
                     self.log_progress("")
-                    self.log_progress("Provisioning Mysterium Network integration...")
-                    self.update_progress(72, "Provisioning Mysterium...")
+                    self.log_progress("Provisioning MystNodes SDK integration...")
+                    self.update_progress(72, "Provisioning MystNodes SDK...")
 
                     resolved_dir = Path(
                         install_result.get("install_dir") or install_result.get("install_path")
                         or options.get("_resolved_install_dir") or options.get("install_dir")
                     )
                     _nssm = resolved_dir / "nssm.exe"
-                    _myst = resolved_dir / "SDK" / "windows-myst-sdk" / "myst.exe"
-                    _data = resolved_dir / "myst-data"
 
-                    _pc = (_BUILD_CONFIG or {}).get("partner_integrations", {}).get("mysterium", {})
-                    _payout = _pc.get("payout_addr") or _pc.get("payout")
-                    _reg = _pc.get("reg_token")
-                    _api = _pc.get("api_key")
-
-                    if not (_payout and _reg and _api and _myst.exists() and _nssm.exists()):
-                        self.log_progress("[error] Mysterium: missing credentials or binaries")
+                    if not _nssm.exists():
+                        self.log_progress("[error] MystNodes SDK: nssm.exe missing")
                         self.installation_failed(
-                            "Mysterium provisioning failed",
-                            ["Required credentials or binaries not found. BM install aborted."],
+                            "MystNodes SDK provisioning failed",
+                            ["nssm.exe not found. BM install aborted."],
                         )
                         return
 
-                    def _prov_cb(msg: str) -> None:
-                        self.log_progress(f"   {msg}")
-                        self.update_progress(72, msg)
+                    def _prov_cb(label: str, status: str) -> None:
+                        self.log_progress(f"   [{label}] {status}")
+                        self.update_progress(72, f"[{label}] {status}")
 
-                    prov_result = provision_mysterium_at_install(
-                        base_dir=resolved_dir,
+                    prov_result = provision_mystnodes_sdk_at_install(
+                        install_root=resolved_dir,
                         nssm_path=_nssm,
-                        myst_bin=_myst,
-                        data_dir=_data,
-                        payout_addr=_payout,
-                        reg_token=_reg,
-                        api_key=_api,
                         progress_callback=_prov_cb,
                     )
 
@@ -5354,16 +5342,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         tos_dir = self._resolve_tos_config_dir()
                         if tos_dir:
                             write_tos_state(tos_dir, accepted_via="installer-interactive")
-                        self.log_progress("Mysterium provisioning complete \u2713")
+                        self.log_progress("MystNodes SDK provisioning complete \u2713")
                     else:
                         self.log_progress(
-                            f"[error] Mysterium: {prov_result.failed_step}: {prov_result.error}"
+                            f"[error] MystNodes SDK: {prov_result.step}: {prov_result.error}"
                         )
-                        cleanup_mysterium_on_failure(resolved_dir, _nssm)
+                        cleanup_mystnodes_sdk_on_failure(resolved_dir, _nssm)
                         self.installation_failed(
-                            "Mysterium Provisioning Failed",
+                            "MystNodes SDK Provisioning Failed",
                             [
-                                f"Step '{prov_result.failed_step}' failed: {prov_result.error}",
+                                f"Step '{prov_result.step}' failed: {prov_result.error}",
                                 "BM install aborted. You may retry.",
                             ],
                         )
@@ -7126,7 +7114,7 @@ foreach ($loc in $locations) {{
             # BM shortcut targets powershell.exe so it can inject BM_SHARING_MODE
             # before launching the GUI (cmd start / ShellExecuteEx drops process env).
             ps_cmd = (
-                f"$env:BM_SHARING_MODE='mysterium'; "
+                f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                 f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
             )
             self._create_windows_shortcut(
@@ -7173,7 +7161,7 @@ foreach ($loc in $locations) {{
         shortcut_path = start_dir / new_lnk
         if miner_code == "BM":
             ps_cmd = (
-                f"$env:BM_SHARING_MODE='mysterium'; "
+                f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                 f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
             )
             self._create_windows_shortcut(
@@ -7217,7 +7205,7 @@ foreach ($loc in $locations) {{
             shortcut_path = startup_dir / new_lnk
             if miner_code == "BM":
                 ps_cmd = (
-                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                     f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
                 )
                 self._create_windows_shortcut(
@@ -7381,7 +7369,7 @@ foreach ($loc in $locations) {{
             shortcut_path = temp_dir / f"FryNetworks_{miner_code}_pin.lnk"
             if miner_code == "BM":
                 ps_cmd = (
-                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                     f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
                 )
                 self._create_windows_shortcut(
@@ -7460,7 +7448,7 @@ if ($item -ne $null) {{
             shortcut_path = temp_dir / f"FryNetworks_{miner_code}_startpin.lnk"
             if miner_code == "BM":
                 ps_cmd = (
-                    f"$env:BM_SHARING_MODE='mysterium'; "
+                    f"$env:BM_SHARING_MODE='mystnodes_sdk'; "
                     f"Start-Process '{gui_exe}' -WorkingDirectory '{install_path}'"
                 )
                 self._create_windows_shortcut(

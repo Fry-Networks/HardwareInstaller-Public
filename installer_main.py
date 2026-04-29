@@ -95,8 +95,20 @@ Examples:
                               help='Configure service to start automatically')
     install_parser.add_argument('--resolve-conflicts', choices=['replace', 'abort', 'force'],
                               default='abort', help='How to handle conflicts')
-    install_parser.add_argument('--accept-mysterium-tos', action='store_true',
-                              help='Accept Mysterium Network TOS for BM headless installs')
+    class _DeprecatedTosAlias(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            if option_string == "--accept-mysterium-tos":
+                sys.stderr.write(
+                    "DeprecationWarning: --accept-mysterium-tos is deprecated. "
+                    "Use --accept-mystnodes-sdk-tos. Both still work this release.\n"
+                )
+            setattr(namespace, self.dest, True)
+
+    install_parser.add_argument(
+        '--accept-mysterium-tos', '--accept-mystnodes-sdk-tos',
+        dest='accept_tos', action=_DeprecatedTosAlias, nargs=0,
+        help='Accept MystNodes SDK terms of service (--accept-mysterium-tos: deprecated alias)',
+    )
     install_parser.add_argument('--quiet', action='store_true',
                               help='Suppress dialogs; defer TOS to GUI catch-up')
     
@@ -509,7 +521,7 @@ from core.config_manager import ConfigManager
 
 # Import external API client from tools package
 from tools.external_api import ExternalApiClient, _BUILD_CONFIG, get_external_api_client
-from core.mysterium_provisioning import provision_mysterium_at_install, cleanup_mysterium_on_failure
+from core.mystnodes_sdk_provisioning import provision_mystnodes_sdk_at_install, cleanup_mystnodes_sdk_on_failure
 
 
 def load_env():
@@ -807,15 +819,15 @@ def install_miner(args):
         # TODO: Implement dependency installation
         print("Dependency installation not yet implemented")
     
-    # Mysterium TOS handling (Track 3)
-    accept_tos = getattr(args, 'accept_mysterium_tos', False)
+    # MystNodes SDK TOS handling (Track 4 — was Mysterium TOS in Track 3)
+    accept_tos = getattr(args, 'accept_tos', False)
     quiet = getattr(args, 'quiet', False)
     if is_bandwidth_miner and quiet and not accept_tos:
-        mysterium_opt_in = False  # defer to GUI catch-up
+        sdk_opt_in = False  # defer to GUI catch-up
     elif is_bandwidth_miner and accept_tos:
-        mysterium_opt_in = True
+        sdk_opt_in = True
     else:
-        mysterium_opt_in = False  # non-BM always False
+        sdk_opt_in = False  # non-BM always False
 
     # Install service
     print("\\nInstalling service...")
@@ -824,8 +836,8 @@ def install_miner(args):
         args.key,
         auto_start=args.auto_start,
         system_wide=args.system_wide,
-        mysterium_opt_in=mysterium_opt_in,
-        _stage_partner_sdks={"mysterium": True} if mysterium_opt_in else {},
+        sdk_opt_in=sdk_opt_in,
+        _stage_partner_sdks={"mystnodes_sdk": True} if sdk_opt_in else {},
     )
 
     if install_result["success"]:
@@ -847,40 +859,25 @@ def install_miner(args):
             elif accept_tos:
                 write_tos_state(config_dir, accepted_via="installer-interactive")
 
-            if mysterium_opt_in and is_bandwidth_miner:
+            if sdk_opt_in and is_bandwidth_miner:
                 base_dir = config_dir.parent
                 nssm_path = base_dir / "nssm.exe"
-                myst_bin = base_dir / "SDK" / "windows-myst-sdk" / "myst.exe"
-                data_dir = base_dir / "myst-data"
 
-                myst_cfg = (_BUILD_CONFIG or {}).get("partner_integrations", {}).get("mysterium", {})
-                payout_addr = myst_cfg.get("payout_addr") or myst_cfg.get("payout")
-                reg_token = myst_cfg.get("reg_token")
-                api_key = myst_cfg.get("api_key")
-
-                if not (payout_addr and reg_token and api_key):
-                    print("✗ Mysterium provisioning skipped — missing build-time credentials")
-                    return 1
-                if not (myst_bin.exists() and nssm_path.exists()):
-                    print(f"✗ Mysterium provisioning skipped — missing binaries: myst={myst_bin.exists()} nssm={nssm_path.exists()}")
+                if not nssm_path.exists():
+                    print("✗ MystNodes SDK provisioning skipped — nssm.exe missing")
                     return 1
 
-                print("→ Provisioning Mysterium node...")
-                result = provision_mysterium_at_install(
-                    base_dir=base_dir,
+                print("→ Provisioning MystNodes SDK Client...")
+                result = provision_mystnodes_sdk_at_install(
+                    install_root=base_dir,
                     nssm_path=nssm_path,
-                    myst_bin=myst_bin,
-                    data_dir=data_dir,
-                    payout_addr=payout_addr,
-                    reg_token=reg_token,
-                    api_key=api_key,
-                    progress_callback=print,
+                    progress_callback=lambda label, status: print(f"  [{label}] {status}"),
                 )
                 if not result.success:
-                    print(f"✗ Mysterium provisioning failed at step '{result.failed_step}': {result.error}")
-                    cleanup_mysterium_on_failure(base_dir, nssm_path)
+                    print(f"✗ MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
+                    cleanup_mystnodes_sdk_on_failure(base_dir, nssm_path)
                     return 1
-                print("✓ Mysterium provisioning complete")
+                print("✓ MystNodes SDK provisioning complete")
 
         return 0
     else:
