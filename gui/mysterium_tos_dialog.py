@@ -13,9 +13,9 @@ def show_mysterium_consent_dialog(
     parent: QtWidgets.QWidget,
     screen_size_pref: str = "auto",
 ) -> bool:
-    """Show Mysterium consent disclaimer and return ``True`` if user agrees."""
+    """Show MystNodes SDK consent disclaimer and return ``True`` if user agrees."""
     dialog = QtWidgets.QDialog(parent)
-    dialog.setWindowTitle("Mysterium Network Sharing Consent")
+    dialog.setWindowTitle("MystNodes SDK Sharing Consent")
     dialog.setModal(True)
 
     layout = QtWidgets.QVBoxLayout(dialog)
@@ -23,9 +23,9 @@ def show_mysterium_consent_dialog(
     layout.setSpacing(16)
 
     disclaimer = QtWidgets.QLabel(
-        "By enabling Mysterium, you agree to share your unused internet bandwidth "
-        "with the Mysterium Network. This allows others to route their internet traffic "
-        "through your connection to get more fVPN tokens.<br><br>"
+        "By enabling MystNodes SDK, you agree to share your unused internet bandwidth "
+        "with the MystNodes network. This allows others to route their internet traffic "
+        "through your connection to earn bandwidth rewards.<br><br>"
         "Your participation is voluntary and you can opt-out at any time by toggling "
         "this setting off.<br><br>"
         "Please review the "
