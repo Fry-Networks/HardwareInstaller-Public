@@ -1,0 +1,9 @@
+
+DisplayName                 Enabled Direction Action
+-----------                 ------- --------- ------
+MysteriumNode-API-In           True   Inbound  Allow
+MysteriumNode-WireGuard-In     True   Inbound  Allow
+MysteriumNode-WireGuard-Out    True  Outbound  Allow
+
+
+

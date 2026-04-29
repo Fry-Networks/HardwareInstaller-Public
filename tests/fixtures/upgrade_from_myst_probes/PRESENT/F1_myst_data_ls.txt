@@ -1,0 +1,5 @@
+total 0
+drwxr-xr-x 1 saf70 197121 0 Apr 29 11:39 .
+drwxr-xr-x 1 saf70 197121 0 Apr 29 11:39 ..
+-rw-r--r-- 1 saf70 197121 0 Apr 29 11:39 .fixture_sentinel
+EXIT=0
