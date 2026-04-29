@@ -522,6 +522,7 @@ from core.config_manager import ConfigManager
 # Import external API client from tools package
 from tools.external_api import ExternalApiClient, _BUILD_CONFIG, get_external_api_client
 from core.mystnodes_sdk_provisioning import provision_mystnodes_sdk_at_install, cleanup_mystnodes_sdk_on_failure
+from core.upgrade_from_myst import upgrade_from_myst_at_install
 
 
 def load_env():
@@ -866,6 +867,19 @@ def install_miner(args):
                 if not nssm_path.exists():
                     print("✗ MystNodes SDK provisioning skipped — nssm.exe missing")
                     return 1
+
+                # Legacy Mysterium teardown (Fix #2b) — must run before SDK provisioning
+                print("→ Checking for legacy Mysterium installation...")
+                upgrade_result = upgrade_from_myst_at_install(
+                    install_root=base_dir,
+                    nssm_path=nssm_path,
+                    progress_callback=lambda msg: print(f"  {msg}"),
+                )
+                if upgrade_result.failed:
+                    print(f"✗ Legacy Mysterium upgrade failed: {upgrade_result.error}")
+                    return 1
+                if upgrade_result.upgrade_performed:
+                    print("✓ Legacy Mysterium teardown complete")
 
                 print("→ Provisioning MystNodes SDK Client...")
                 result = provision_mystnodes_sdk_at_install(
