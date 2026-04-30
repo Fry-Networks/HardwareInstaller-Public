@@ -1,0 +1,2 @@
+-rw-r--r-- 1 saf70 197121 206 Apr 26 14:33 /c/ProgramData/FryNetworks/miner-BM/config/mysterium.json
+EXIT=0

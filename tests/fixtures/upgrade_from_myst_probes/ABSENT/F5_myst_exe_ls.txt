@@ -1,0 +1,2 @@
+ls: cannot access '/c/tmp/track4_fix2_statesim_1777480673/empty_ref/SDK/windows-myst-sdk/myst.exe': No such file or directory
+EXIT=2

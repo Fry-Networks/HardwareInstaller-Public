@@ -217,9 +217,9 @@ def _build_sdk_approval_payload(options: Optional[dict]) -> dict:
         for key, value in explicit.items():
             approvals[str(key).lower()] = _normalize_sdk_approval_value(value)
     else:
-        approvals["mysterium"] = _normalize_sdk_approval_value(opts.get("mysterium_opt_in", False))
+        approvals["mystnodes_sdk"] = _normalize_sdk_approval_value(opts.get("sdk_opt_in", False))
 
-    approvals.setdefault("mysterium", False)
+    approvals.setdefault("mystnodes_sdk", False)
 
     return {"approvals": approvals}
 
@@ -312,76 +312,58 @@ def _write_partner_secret_file(
         json.dump(encrypted, fh, indent=2)
 
 
-def _configure_mysterium_assets(base_dir: Path, sdk_root: Path, platform: str) -> list[str]:
-    """Copy Mysterium SDK assets for BM and create config.
-    
-    Credentials (API key, payout address, registration token) are handled by the GUI at runtime.
+def _configure_mystnodes_sdk_assets(base_dir: Path, sdk_root: Path, platform: str) -> list[str]:
+    """Copy MystNodes SDK Client assets for BM and create state file.
+
+    sdk_client.exe is a standalone binary — no supervisor, no config folder.
     """
     actions: list[str] = []
     sdk_dest = base_dir / "SDK"
     sdk_dest.mkdir(parents=True, exist_ok=True)
 
     is_windows = platform.startswith("win")
-    
+
     if is_windows:
-        src_folder = "windows-myst-sdk"
-        executable_name = "myst.exe"
-        supervisor_name = "myst_supervisor.exe"
+        src_folder = "windows-mystnodes-sdk"
+        executable_name = "sdk_client.exe"
     else:
-        src_folder = "linux-amd64-myst-sdk"
-        executable_name = "myst"
-        supervisor_name = "myst_supervisor"
+        src_folder = "linux-amd64-mystnodes-sdk"
+        executable_name = "sdk_client"
 
-    myst_src = sdk_root / src_folder
-    mysterium_sdk_dest = sdk_dest / src_folder
+    sdk_src = sdk_root / src_folder
+    sdk_dest_dir = sdk_dest / src_folder
 
-    if myst_src.exists():
-        mysterium_sdk_dest.mkdir(parents=True, exist_ok=True)
-        
-        # Copy main executable
-        myst_exe = myst_src / executable_name
-        if myst_exe.exists():
-            shutil.copy2(myst_exe, mysterium_sdk_dest / executable_name)
+    if sdk_src.exists():
+        sdk_dest_dir.mkdir(parents=True, exist_ok=True)
+
+        sdk_exe = sdk_src / executable_name
+        if sdk_exe.exists():
+            shutil.copy2(sdk_exe, sdk_dest_dir / executable_name)
             if not is_windows:
-                # Make executable on Linux
                 import stat
-                (mysterium_sdk_dest / executable_name).chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+                (sdk_dest_dir / executable_name).chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
             actions.append(f"Copied {executable_name} to SDK folder")
         else:
             raise FileNotFoundError(f"Missing {executable_name} in {src_folder}")
-        
-        # Copy supervisor if present
-        myst_supervisor = myst_src / supervisor_name
-        if myst_supervisor.exists():
-            shutil.copy2(myst_supervisor, mysterium_sdk_dest / supervisor_name)
-            if not is_windows:
-                import stat
-                (mysterium_sdk_dest / supervisor_name).chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-            actions.append(f"Copied {supervisor_name} to SDK folder")
-        
-        # Copy config folder if present
-        config_src = myst_src / "config"
-        if config_src.exists() and config_src.is_dir():
-            shutil.copytree(config_src, mysterium_sdk_dest / "config", dirs_exist_ok=True)
-            actions.append("Copied mysterium config assets")
     else:
         raise FileNotFoundError(f"Missing {src_folder} assets in SDK bundle")
 
     config_dir = base_dir / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = base_dir / "logs" / "mysterium"
+    log_dir = base_dir / "logs" / "mystnodes_sdk"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg_path = config_dir / "mysterium.json"
-    mysterium_config = {
-        "enabled": False,
+    cfg_path = config_dir / "mystnodes_sdk.json"
+    sdk_config = {
+        "schema_version": 1,
+        "service_name": "MystNodesSDK",
+        "managed_by": "Track 4",
         "sdk_root": "SDK",
         "executable_path": f"SDK/{src_folder}/{executable_name}",
         "log_dir": str(log_dir),
-        "poll_interval_seconds": 20,
     }
     with open(cfg_path, "w", encoding="utf-8") as fh:
-        json.dump(mysterium_config, fh, indent=2)
+        json.dump(sdk_config, fh, indent=2)
     actions.append(f"Wrote {cfg_path}")
 
     return actions
@@ -393,10 +375,10 @@ def _prepare_partner_integrations(
     options: Optional[dict],
     platform: str,
 ) -> list[str]:
-    """Stage Mysterium SDK assets for BM installs (public build).
+    """Stage MystNodes SDK Client assets for BM installs (public build).
 
-    Mysterium is the sole partner integration.  Credentials are handled
-    by the GUI at runtime.
+    MystNodes SDK is the sole partner integration. Token plumbing handled by
+    mystnodes_sdk_provisioning at install time.
     """
     opts = dict(options or {})
     if str(miner_code).upper() != "BM":
@@ -404,16 +386,16 @@ def _prepare_partner_integrations(
 
     stage_map = opts.get("_stage_partner_sdks")
     stage_all = isinstance(stage_map, bool) and stage_map
-    stage_mysterium = stage_all or (isinstance(stage_map, dict) and stage_map.get("mysterium", False))
+    stage_sdk = stage_all or (isinstance(stage_map, dict) and stage_map.get("mystnodes_sdk", False))
 
-    if not stage_mysterium:
+    if not stage_sdk:
         return []
 
     sdk_root = _locate_sdk_bundle()
     if sdk_root is None:
         raise RuntimeError("SDK asset bundle is missing from the installer")
 
-    return _configure_mysterium_assets(base_dir, sdk_root, platform)
+    return _configure_mystnodes_sdk_assets(base_dir, sdk_root, platform)
 
 
 def get_external_ip() -> str:
@@ -707,17 +689,17 @@ class WindowsServiceManager:
                 from tools.external_api import _BUILD_CONFIG
                 partner_cfg = _BUILD_CONFIG.get('partner_integrations', {}) if isinstance(_BUILD_CONFIG, dict) else {}
 
-                # Mysterium (sole partner integration in public build)
-                myst_cfg = partner_cfg.get('mysterium', {}) or {}
-                if myst_cfg.get('enabled'):
-                    payout = myst_cfg.get('payout_addr') or myst_cfg.get('payout')
-                    reg = myst_cfg.get('reg_token')
-                    api = myst_cfg.get('api_key')
+                # MystNodes SDK (sole partner integration in public build, Track 4)
+                sdk_cfg = partner_cfg.get('mystnodes_sdk', {}) or {}
+                if sdk_cfg.get('enabled'):
+                    payout = sdk_cfg.get('payout_addr') or sdk_cfg.get('payout')
+                    reg = sdk_cfg.get('reg_token')
+                    api = sdk_cfg.get('api_key')
                     if not (payout and reg and api):
-                        raise RuntimeError("Embedded build config marks mysterium enabled but missing one or more credentials")
-                    config_data['mysterium_payout_addr'] = payout
-                    config_data['mysterium_reg_token'] = reg
-                    config_data['mysterium_api_key'] = api
+                        raise RuntimeError("Embedded build config marks mystnodes_sdk enabled but missing one or more credentials")
+                    config_data['mystnodes_sdk_payout_addr'] = payout
+                    config_data['mystnodes_sdk_reg_token'] = reg
+                    config_data['mystnodes_sdk_api_key'] = api
 
             # Encrypt
             f = Fernet(key)
