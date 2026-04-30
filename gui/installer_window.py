@@ -272,9 +272,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         if display_version:
             # Avoid double "v" when version already includes it (e.g., v1.1.1)
             prefix = "" if display_version.lstrip().lower().startswith("v") else "v"
-            window_title = f"Fry Networks Miners and Nodes Installer {prefix}{display_version}{platform_suffix}"
+            window_title = f"Fry Hub {prefix}{display_version}{platform_suffix}"
         else:
-            window_title = f"Fry Networks Miners and Nodes Installer{platform_suffix}"
+            window_title = f"Fry Hub{platform_suffix}"
         
         # Add TEST VERSIONS suffix when test mode is enabled
         if self._use_test_versions:
@@ -525,7 +525,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
         
         # Configure wizard
-        self.wizard.setWindowTitle("Fry Networks Miners and Nodes Installer")
+        self.wizard.setWindowTitle("Fry Hub")
         self.wizard.setWizardStyle(QtWidgets.QWizard.WizardStyle.ModernStyle)
         self.wizard.setOptions(
             QtWidgets.QWizard.WizardOption.NoBackButtonOnStartPage |
@@ -616,7 +616,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             background_path = Path(__file__).parent.parent / "resources" / "background.png"
         
         self.banner = TopBanner(
-            "Fry Networks Miners and Nodes Installer",
+            "Fry Hub",
             str(background_path) if background_path.exists() else None,
             height=120
         )
@@ -762,7 +762,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "Fry Networks Miners and Nodes Installer",
+                    "Fry Hub",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -1041,7 +1041,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         body_rows: List[str] = []
         for code in row_order:
             display_name = miner_name_for(code)
-            
+
+            # Build cell HTML: escape name (safe), then optionally append raw HTML note
+            cell_html = escape(display_name)
+            if code not in ("AEM", "BM"):
+                cell_html += (
+                    "<br><span style='font-size:11px; color:#f59e0b; font-style:italic;'>"
+                    "\u26a0 Experimental / Early Alpha \u2014 open a Discord ticket for issues"
+                    "</span>"
+                )
+
             # Windows column: show ✓ - TEST for both, TEST for test-only, ✓ for prod only, ✗ for unavailable
             if code in both_win:
                 # Both prod and test: checkmark for prod, separator, TEST for test
@@ -1089,7 +1098,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             body_rows.append(
                 "<tr>"
                 f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06);'>{escape(code)}</td>"
-                f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; line-height:1.1;'>{escape(display_name)}</td>"
+                f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; line-height:1.1;'>{cell_html}</td>"
                 f"<td style='text-align:center; padding:8px 10px; color:{win_color}; {win_style} border-bottom:1px solid rgba(255,255,255,0.06);'>{win_avail}</td>"
                 f"<td style='text-align:center; padding:8px 10px; color:{lin_color}; {lin_style} border-bottom:1px solid rgba(255,255,255,0.06);'>{lin_avail}</td>"
                 "</tr>"
@@ -1640,7 +1649,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "Fry Networks Miners and Nodes Installer",
+                    "Fry Hub",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -2395,7 +2404,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 if len(new_warnings) > 3:
                     summary += f"\n(+{len(new_warnings) - 3} more)"
                 self._tray_icon.showMessage(
-                    "Fry Networks Installer",
+                    "Fry Hub",
                     f"Miner updates required:\n{summary}",
                     QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
                     5000,
@@ -3887,10 +3896,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
 
         self._slog.info("_setup_tray_icon(): creating QSystemTrayIcon")
         tray = QtWidgets.QSystemTrayIcon(icon, self)
-        tray.setToolTip("Fry Installer - Install and update Fry miners and nodes")
+        tray.setToolTip("Fry Hub - Install and update Fry miners and nodes")
 
         menu = QtWidgets.QMenu(self)
-        show_action = menu.addAction("Show Fry Networks Installer")
+        show_action = menu.addAction("Show Fry Hub")
         autostart_action = menu.addAction("Launch installer on login")
         autostart_action.setCheckable(True)
         autostart_action.setChecked(self._is_installer_autostart_enabled())
@@ -3901,7 +3910,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             task_autostart_action.setChecked(self._is_installer_task_autostart_enabled())
         menu.addSeparator()
         update_action = menu.addAction("Check for Updates")
-        exit_action = menu.addAction("Exit Fry Networks Installer")
+        exit_action = menu.addAction("Exit Fry Hub")
         show_action.triggered.connect(self._restore_from_tray)
         autostart_action.triggered.connect(lambda checked: self._toggle_installer_autostart(checked))
         if task_autostart_action:
@@ -3983,7 +3992,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     QtWidgets.QMessageBox.information(
                         self, "Check for Updates",
                         f"You are already running the latest version of "
-                        f"Fry Networks Installer (v{WINDOWS_VERSION})."
+                        f"Fry Hub (v{WINDOWS_VERSION})."
                     )
             else:
                 QtWidgets.QMessageBox.warning(
@@ -4020,7 +4029,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.raise_()
         self.activateWindow()
         try:
-            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "Fry Networks Installer is active."
+            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "Fry Hub is active."
             self.status_bar.setText(status_text)
         except Exception:
             pass
@@ -4084,7 +4093,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 if not self._tray_message_shown:
                     try:
                         self._tray_icon.showMessage(
-                            "Fry Networks Hub",
+                            "Fry Hub",
                             "Install and update Fry miners and nodes. Right-click the tray icon to exit.",
                             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
                             4000,
@@ -4102,7 +4111,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         """Return the per-user autostart entry path for the installer."""
         if os.name == 'nt':
             return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / \
-                "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Fry Installer.lnk"
+                "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Fry Hub.lnk"
         if sys.platform.startswith("linux"):
             cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
             return cfg / "autostart" / "fry-installer.desktop"
@@ -4157,8 +4166,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     shortcut_path=path,
                     target_path=exe_path,
                     working_dir=exe_path.parent,
-                    description="Fry Installer"
+                    description="Fry Hub"
                 )
+                # Clean up legacy "Fry Installer.lnk" if present (pre-rename upgrade path)
+                legacy_path = path.parent / "Fry Installer.lnk"
+                if legacy_path.exists():
+                    try:
+                        legacy_path.unlink()
+                        self._debug_log(f"Removed legacy shortcut: {legacy_path}")
+                    except OSError:
+                        pass
                 return True, "Installer will launch automatically on login."
             except Exception as e:
                 return False, f"Failed to enable autostart: {e}"
@@ -4169,7 +4186,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 desktop_contents = "\n".join([
                     "[Desktop Entry]",
                     "Type=Application",
-                    "Name=Fry Installer",
+                    "Name=Fry Hub",
                     f"Exec={exe_path}",
                     f"Path={exe_path.parent}",
                     "X-GNOME-Autostart-enabled=true",
@@ -4188,6 +4205,11 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         try:
             if path and path.exists():
                 path.unlink()
+            # Also clean up legacy "Fry Installer.lnk" if present
+            if path:
+                legacy_path = path.parent / "Fry Installer.lnk"
+                if legacy_path.exists():
+                    legacy_path.unlink()
             return True, "Installer will no longer launch on login."
         except Exception as e:
             return False, f"Failed to disable autostart: {e}"

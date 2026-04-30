@@ -109,7 +109,7 @@ def run_build(version):
         return False
 
     print(f"\n{'='*60}")
-    print(f"Building Fry Networks Installer v{version} ({'windows' if is_windows else 'linux'})")
+    print(f"Building Fry Hub v{version} ({'windows' if is_windows else 'linux'})")
     print(f"{'='*60}\n")
 
     try:
@@ -256,7 +256,7 @@ def show_version_info():
     lin_major, lin_minor, lin_patch = parse_version(lin_version)
     
     print("\n" + "="*60)
-    print("Fry Networks Installer - Version Information")
+    print("Fry Hub - Version Information")
     print("="*60)
     print(f"Windows Version: {win_version}  (Major={win_major}, Minor={win_minor}, Patch={win_patch})")
     print(f"Linux Version:   {lin_version}  (Major={lin_major}, Minor={lin_minor}, Patch={lin_patch})")
@@ -265,7 +265,7 @@ def show_version_info():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fry Networks Installer Build Tool",
+        description="Fry Hub Build Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
