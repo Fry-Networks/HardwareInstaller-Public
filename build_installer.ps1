@@ -38,7 +38,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 Write-Host "========================================"  -ForegroundColor Cyan
-Write-Host "FryNetworks Installer Build Script" -ForegroundColor Cyan
+Write-Host "Fry Hub Build Script" -ForegroundColor Cyan
 Write-Host "Version: $Version" -ForegroundColor Cyan
 Write-Host "========================================"  -ForegroundColor Cyan
 $InstallerDir = Split-Path -Parent $MyInvocation.MyCommand.Path

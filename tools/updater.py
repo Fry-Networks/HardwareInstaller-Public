@@ -543,7 +543,7 @@ def run_poc_updates(args: argparse.Namespace, log_file: Path) -> int:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Update FryNetworks Installer from Bunny CDN manifest."
+        description="Update Fry Hub from Bunny CDN manifest."
     )
     p.add_argument(
         "--manifest-url", default=None,

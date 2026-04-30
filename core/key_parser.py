@@ -21,7 +21,7 @@ class MinerKeyParser:
         "ODM": {"name": "Outdoor Decibel Miner", "group": "Decibel", "exclusive": "IDM"},
         "ISM": {"name": "Indoor Satellite Miner", "group": "Satellite", "exclusive": "OSM"},
         "OSM": {"name": "Outdoor Satellite Miner", "group": "Satellite", "exclusive": "ISM"},
-        "RDN": {"name": "Rewards Decentralization Node", "group": "RDN", "exclusive": None},
+        "RDN": {"name": "Compute Node", "group": "RDN", "exclusive": None},
         "SVN": {"name": "Storage Validator Node", "group": "SVN", "exclusive": None},
         "SDN": {"name": "Storage Decentralization Node", "group": "SDN", "exclusive": None},
         "AEM": {"name": "AI Edge Miner", "group": "AEM", "exclusive": None},
