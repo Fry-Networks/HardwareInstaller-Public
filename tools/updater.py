@@ -1,9 +1,18 @@
 """
 FryNetworks Installer Updater
 
-Checks the latest GitHub release for a newer MSI, downloads it, verifies (optional)
-SHA256, and invokes msiexec to install. Designed to be run silently from a scheduled
-task (per-user, non-elevated).
+Checks the Bunny CDN manifest for a newer installer, downloads it, verifies
+SHA256, and launches the new installer. Also handles PoC service binary
+updates via GitHub Releases. Designed to run silently from a scheduled task.
+
+Exit codes:
+    0 — Success or no update needed
+    2 — Manifest fetch failed
+    3 — Manifest missing required fields
+    4 — Download failed (partial file cleaned up)
+    5 — SHA256 mismatch (downloaded file deleted)
+    6 — Installer execution failed (services may be stopped)
+    7 — Version discovery failed
 """
 
 from __future__ import annotations
@@ -12,6 +21,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,53 +29,207 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, cast
 
 
-DEFAULT_REPO = "Fry-Foundation/HardwareInstaller-Public"
+# --- Constants ---
+
+DEFAULT_MANIFEST_URL = (
+    "https://frynetworks-downloads.b-cdn.net/frynetworks-installer/latest/version.json"
+)
+DEFAULT_LOG_PATH = Path(r"C:\ProgramData\FryNetworks\updater\updater.log")
 DEFAULT_TASK_NAME = "FryNetworksUpdater"
 DEFAULT_EMBEDDED_TOKEN = os.getenv("EMBEDDED_GITHUB_TOKEN", "")
 DEFAULT_POC_REPO = "Fry-Foundation/HardwarePoC_releases"
+DEFAULT_POC_CONFIG_DIR = r"C:\ProgramData\FryNetworks"
+
+# Kept for backward compat (PoC updates still use GitHub)
+DEFAULT_REPO = "Fry-Foundation/HardwareInstaller-Public"
+
+MANIFEST_REQUIRED_FIELDS = ("version", "sha256", "download_url")
 
 
-def log_path(custom: Optional[Path] = None) -> Path:
-    if custom:
-        return custom
-    base = Path(os.getenv("LOCALAPPDATA", tempfile.gettempdir()))
-    return base / "FryNetworks" / "Updater" / "updater.log"
-
+# --- Logging ---
 
 def write_log(msg: str, dest: Path) -> None:
+    """Append a timestamped log line to the updater log file."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text((dest.read_text() if dest.exists() else "") + msg + "\n", encoding="utf-8")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"[{ts}] {msg}\n"
+    with open(dest, "a", encoding="utf-8") as f:
+        f.write(line)
 
+
+def log_and_print(msg: str, log_file: Path, quiet: bool = False) -> None:
+    """Write to log file always; print to stdout unless --quiet."""
+    write_log(msg, log_file)
+    if not quiet:
+        print(msg)
+
+
+# --- Version utilities ---
 
 def normalize_version(ver: str) -> str:
     ver = ver.strip()
     return ver if ver.startswith("v") else f"v{ver}"
 
 
-def read_version_from_installer(dir_path: Path) -> Optional[str]:
-    """
-    Look for frynetworks_installer_v*.exe next to the updater and parse the version.
-    """
-    pattern = "frynetworks_installer_v*.exe"
-    for candidate in dir_path.glob(pattern):
-        name = candidate.name
-        # expect frynetworks_installer_vX.Y.Z.exe
-        if "_v" in name:
-            part = name.split("_v", 1)[-1].rsplit(".", 1)[0]
-            return normalize_version(part)
+def compare_versions(a: str, b: str) -> int:
+    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples."""
+    def tup(s):
+        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
+        parts = s.split(".") if s else []
+        out = []
+        for p in parts:
+            try:
+                out.append(int(p))
+            except ValueError:
+                out.append(0)
+        return tuple(out)
+    ta, tb = tup(a), tup(b)
+    if ta < tb:
+        return -1
+    if ta > tb:
+        return 1
+    return 0
+
+
+# --- Version discovery ---
+
+def _pe_file_version(exe_path: Path) -> Optional[str]:
+    """Read PE FileVersion resource via PowerShell. Returns version string or None."""
+    if not exe_path.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-Command",
+                f"[System.Diagnostics.FileVersionInfo]::GetVersionInfo('{exe_path}').FileVersion"
+            ],
+            capture_output=True, timeout=10, text=True,
+        )
+        ver = result.stdout.strip()
+        if ver and ver != "":
+            return ver
+    except Exception:
+        pass
     return None
 
+
+def _find_installer_exe(base_dir: Path) -> Optional[Path]:
+    """Find frynetworks_installer*.exe under miner-* dirs."""
+    for miner_dir in sorted(base_dir.glob("miner-*")):
+        if not miner_dir.is_dir() or "." in miner_dir.name[len("miner-"):]:
+            continue
+        for exe in miner_dir.glob("frynetworks_installer*.exe"):
+            if exe.is_file():
+                return exe
+    return None
+
+
+def _read_config_versions(base_dir: Path) -> list[tuple[str, Path]]:
+    """Read installer_version from all miner-*/config/installer_config.json.
+    Returns list of (version, path) sorted by version descending."""
+    versions = []
+    for cfg in sorted(base_dir.glob("miner-*/config/installer_config.json")):
+        # Skip backup dirs
+        miner_name = cfg.parent.parent.name
+        if "." in miner_name[len("miner-"):]:
+            continue
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            ver = data.get("installer_version")
+            if ver and ver.strip():
+                versions.append((ver.strip(), cfg))
+        except Exception:
+            continue
+    # Sort by version descending
+    versions.sort(key=lambda x: x[0], reverse=True)
+    return versions
+
+
+def discover_installer_version(
+    cli_version: Optional[str],
+    poc_config_dir: str,
+    log_file: Path,
+) -> Optional[str]:
+    """Discover the installed version via cascade:
+      1. CLI --current-version argument
+      2. PE FileVersion of frynetworks_installer*.exe under miner dirs
+      3. installer_config.json → MAX installer_version across all miner dirs
+      4. None (caller should exit 7)
+    """
+    base_dir = Path(poc_config_dir)
+
+    # 1. CLI argument
+    if cli_version:
+        ver = normalize_version(cli_version)
+        write_log(f"[INFO] Version source: CLI argument -> {ver}", log_file)
+        return ver
+
+    # 2. PE FileVersion of installer EXE
+    installer_exe = _find_installer_exe(base_dir)
+    if installer_exe:
+        pe_ver = _pe_file_version(installer_exe)
+        if pe_ver:
+            ver = normalize_version(pe_ver)
+            write_log(f"[INFO] Version source: PE FileVersion of {installer_exe} -> {ver}", log_file)
+            return ver
+        else:
+            write_log(f"[INFO] Installer EXE found at {installer_exe} but no PE FileVersion", log_file)
+
+    # 3. Config file fallback — pick MAX across all miner dirs
+    config_versions = _read_config_versions(base_dir)
+    if config_versions:
+        all_vers = [(v, str(p)) for v, p in config_versions]
+        write_log(f"[INFO] Config versions found: {all_vers}", log_file)
+        # Pick the maximum version
+        best_ver = config_versions[0][0]
+        for v, _ in config_versions[1:]:
+            if compare_versions(v, best_ver) > 0:
+                best_ver = v
+        ver = normalize_version(best_ver)
+        write_log(f"[INFO] Version source: MAX config installer_version -> {ver}", log_file)
+        return ver
+
+    # 4. Failed
+    write_log("[ERROR] Version discovery failed: no CLI arg, no installer EXE, no usable config", log_file)
+    return None
+
+
+# --- Network utilities ---
 
 def fetch_json(url: str, token: Optional[str] = None) -> dict:
     req = urllib.request.Request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_manifest(url: str, log_file: Path) -> Optional[dict]:
+    """Fetch and validate the Bunny CDN installer manifest.
+
+    Returns manifest dict on success, None on failure (logged).
+    """
+    try:
+        manifest = fetch_json(url)
+    except Exception as e:
+        write_log(f"[ERROR] Manifest fetch failed from {url}: {e}", log_file)
+        return None
+
+    # Validate required fields
+    missing = [f for f in MANIFEST_REQUIRED_FIELDS if f not in manifest or not manifest[f]]
+    if missing:
+        write_log(
+            f"[ERROR] Manifest at {url} missing required fields: {missing}",
+            log_file,
+        )
+        return None
+
+    return manifest
 
 
 def download(url: str, dest: Path, token: Optional[str] = None) -> None:
@@ -73,89 +237,12 @@ def download(url: str, dest: Path, token: Optional[str] = None) -> None:
     if token:
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Accept", "application/octet-stream")
-    with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as f:
         while True:
             chunk = resp.read(1024 * 1024)
             if not chunk:
                 break
             f.write(chunk)
-
-
-def find_asset(release: dict, suffix: str) -> Optional[dict]:
-    for asset in release.get("assets", []):
-        name = asset.get("name", "")
-        if name.lower().endswith(suffix.lower()):
-            return asset
-    return None
-
-
-def find_installer_asset(release: dict) -> Optional[dict]:
-    """Find the installer asset, preferring MSI over EXE, filtered to frynetworks_installer_* prefix."""
-    candidates = []
-    for asset in release.get("assets", []):
-        name = asset.get("name", "").lower()
-        if name.startswith("frynetworks_installer_"):
-            candidates.append(asset)
-    if not candidates:
-        return None
-    for c in candidates:
-        if c.get("name", "").lower().endswith(".msi"):
-            return c
-    return candidates[0]
-
-
-def discover_installer_version(cli_version: Optional[str], log_file: Path) -> Optional[str]:
-    """
-    Discover the installed version via a cascade:
-      1. CLI --current-version argument
-      2. ARP registry DisplayVersion for FryNetworks Installer
-      3. Filename pattern (frynetworks_installer_v*.exe next to updater)
-      4. Hard-fail (return None)
-    """
-    if cli_version:
-        ver = normalize_version(cli_version)
-        write_log(f"Version source: CLI argument -> {ver}", log_file)
-        return ver
-
-    if sys.platform.startswith("win"):
-        try:
-            import winreg
-            uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
-            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-                for view_flag in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
-                    try:
-                        with winreg.OpenKey(root, uninstall_key, 0,
-                                            winreg.KEY_READ | view_flag) as key:
-                            i = 0
-                            while True:
-                                try:
-                                    subkey_name = winreg.EnumKey(key, i)
-                                    with winreg.OpenKey(key, subkey_name, 0,
-                                                        winreg.KEY_READ | view_flag) as subkey:
-                                        try:
-                                            display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
-                                            if "frynetworks" in display_name.lower() and "installer" in display_name.lower():
-                                                display_ver, _ = winreg.QueryValueEx(subkey, "DisplayVersion")
-                                                ver = normalize_version(str(display_ver))
-                                                write_log(f"Version source: ARP registry -> {ver}", log_file)
-                                                return ver
-                                        except OSError:
-                                            pass
-                                    i += 1
-                                except OSError:
-                                    break
-                    except OSError:
-                        pass
-        except ImportError:
-            pass
-
-    ver = read_version_from_installer(Path(__file__).resolve().parent)
-    if ver:
-        write_log(f"Version source: filename pattern -> {ver}", log_file)
-        return ver
-
-    write_log("CANNOT_DETERMINE_INSTALLER_VERSION: all discovery methods exhausted.", log_file)
-    return None
 
 
 def sha256_file(path: Path) -> str:
@@ -166,28 +253,56 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_installer(installer_path: Path, quiet: bool, log_file: Path) -> None:
+# --- Installer execution ---
+
+def run_installer(installer_path: Path, quiet: bool, log_file: Path) -> int:
+    """Run installer BLOCKING, capturing output to log. Returns exit code."""
     args = [str(installer_path)]
     if quiet:
         args.append("--quiet")
-    write_log(f"Running: {' '.join(args)}", log_file)
-    subprocess.Popen(args)
+    write_log(f"[INFO] Update in progress — services will be down during install window.", log_file)
+    write_log(f"[INFO] Running installer: {' '.join(args)}", log_file)
+
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=600,  # 10 min max
+            text=True,
+        )
+        if result.stdout:
+            for line in result.stdout.splitlines():
+                write_log(f"[INSTALLER-STDOUT] {line}", log_file)
+        if result.stderr:
+            for line in result.stderr.splitlines():
+                write_log(f"[INSTALLER-STDERR] {line}", log_file)
+        write_log(f"[INFO] Installer exited with code {result.returncode}", log_file)
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        write_log("[ERROR] Installer timed out after 600s", log_file)
+        return -1
+    except Exception as e:
+        write_log(f"[ERROR] Installer execution failed: {e}", log_file)
+        return -1
+
+
+# --- PoC update functions (unchanged — still use GitHub Releases) ---
+
+def find_asset(release: dict, suffix: str) -> Optional[dict]:
+    for asset in release.get("assets", []):
+        name = asset.get("name", "")
+        if name.lower().endswith(suffix.lower()):
+            return asset
+    return None
 
 
 def find_poc_asset(release: dict, miner_code: str) -> Optional[dict]:
-    """Find a PoC service asset for *miner_code* in *release*.
-
-    Looks for ``FRY_PoC_{miner_code}_v*.exe`` among the release assets and
-    extracts the version from the filename.  Returns a dict with keys
-    ``name``, ``url``, ``version``, and ``sha_asset`` (the matching
-    ``.sha256`` sidecar asset dict, or *None*), or *None* if no match.
-    """
+    """Find a PoC service asset for *miner_code* in *release*."""
     prefix = f"FRY_PoC_{miner_code}_v".lower()
     for asset in release.get("assets", []):
         name = asset.get("name", "")
         if not name.lower().startswith(prefix) or not name.lower().endswith(".exe"):
             continue
-        # Extract version: FRY_PoC_BM_v1.6.5.exe → 1.6.5
         ver_part = name.rsplit("_v", 1)[-1].rsplit(".", 1)[0]
         if not ver_part:
             continue
@@ -207,14 +322,13 @@ def find_poc_asset(release: dict, miner_code: str) -> Optional[dict]:
 
 
 def discover_poc_installs(config_dir: Path) -> list:
-    """Scan *config_dir* for installed PoC miners.
-
-    Looks for ``miner-*/config/installer_config.json`` under *config_dir* and
-    returns a list of dicts with ``miner_code``, ``poc_version``,
-    ``install_root``, ``nssm_path``, and ``config_path``.
-    """
+    """Scan *config_dir* for installed PoC miners."""
     installs = []
     for cfg in sorted(config_dir.glob("miner-*/config/installer_config.json")):
+        # Skip backup dirs
+        miner_name = cfg.parent.parent.name
+        if "." in miner_name[len("miner-"):]:
+            continue
         try:
             data = json.loads(cfg.read_text(encoding="utf-8"))
         except Exception:
@@ -243,10 +357,7 @@ def update_poc_service(
     new_version: str,
     log_file: Path,
 ) -> None:
-    """Stop → backup → swap → re-register → start a PoC service.
-
-    Raises on failure so the caller can surface partial-update state.
-    """
+    """Stop -> backup -> swap -> re-register -> start a PoC service."""
     miner_code = info["miner_code"]
     install_root = info["install_root"]
     nssm = str(info["nssm_path"])
@@ -259,40 +370,40 @@ def update_poc_service(
         [nssm, "stop", old_service],
         check=False, capture_output=True, timeout=30,
     )
-    time.sleep(2)  # Allow SCM to finalize state
-    # Verify service actually stopped (nssm returns 1 on kill-path stop)
+    time.sleep(2)
     status = subprocess.run(
         [nssm, "status", old_service],
         capture_output=True, timeout=10,
     )
-    # nssm status output is UTF-16 LE
     svc_state = status.stdout.decode("utf-16-le", errors="ignore").strip()
     if "STOPPED" not in svc_state and "SERVICE_STOPPED" not in svc_state:
         raise RuntimeError(
             f"Service {old_service} failed to stop "
             f"(nssm stop rc={result.returncode}, status={svc_state!r})"
         )
-    write_log(f"STOPPED: {old_service}", log_file)
+    write_log(f"[INFO] STOPPED: {old_service}", log_file)
 
     # 2. Remove
     subprocess.run(
         [nssm, "remove", old_service, "confirm"],
         check=True, capture_output=True, timeout=15,
     )
-    write_log(f"REMOVED: {old_service}", log_file)
+    write_log(f"[INFO] REMOVED: {old_service}", log_file)
 
     # 3. Backup old exe(s)
     ts = int(time.time())
     for old_exe in install_root.glob(f"FRY_PoC_{miner_code}_v*.exe"):
+        if ".bak" in old_exe.name:
+            continue
         bak = old_exe.parent / f"{old_exe.name}.bak.{ts}"
         shutil.copy2(str(old_exe), str(bak))
-        write_log(f"BACKUP: {bak}", log_file)
+        write_log(f"[INFO] BACKUP: {bak}", log_file)
 
     # 4. Install new exe
     shutil.copy2(str(new_exe_dest), str(new_exe_path))
-    write_log(f"INSTALLED: {new_exe_path}", log_file)
+    write_log(f"[INFO] INSTALLED: {new_exe_path}", log_file)
 
-    # 5. Register — convention-derived params (matches service_manager.py)
+    # 5. Register
     logs_dir = install_root / "logs"
     logs_dir.mkdir(exist_ok=True)
 
@@ -324,24 +435,26 @@ def update_poc_service(
         [nssm, "set", new_service, "Start", "SERVICE_AUTO_START"],
         check=True, capture_output=True, timeout=10,
     )
-    write_log(f"REGISTERED: {new_service}", log_file)
+    write_log(f"[INFO] REGISTERED: {new_service}", log_file)
 
     # 6. Start
     subprocess.run(
         [nssm, "start", new_service],
         check=True, capture_output=True, timeout=30,
     )
-    write_log(f"STARTED: {new_service}", log_file)
+    write_log(f"[INFO] STARTED: {new_service}", log_file)
 
     # 7. Update installer_config.json
     cfg_path = info["config_path"]
     try:
         cfg_data = json.loads(cfg_path.read_text(encoding="utf-8"))
         cfg_data["poc_version"] = new_version
-        cfg_path.write_text(json.dumps(cfg_data, indent=2) + "\n", encoding="utf-8")
-        write_log(f"CONFIG UPDATED: {cfg_path}", log_file)
+        tmp_path = cfg_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(cfg_data, indent=2) + "\n", encoding="utf-8")
+        os.replace(str(tmp_path), str(cfg_path))
+        write_log(f"[INFO] CONFIG UPDATED: {cfg_path}", log_file)
     except Exception as exc:
-        write_log(f"WARNING: config update failed ({cfg_path}): {exc}", log_file)
+        write_log(f"[WARN] config update failed ({cfg_path}): {exc}", log_file)
 
 
 def run_poc_updates(args: argparse.Namespace, log_file: Path) -> int:
@@ -355,7 +468,7 @@ def run_poc_updates(args: argparse.Namespace, log_file: Path) -> int:
     )
     installs = discover_poc_installs(Path(args.poc_config_dir))
     if not installs:
-        write_log("No PoC installations found.", log_file)
+        write_log("[INFO] No PoC installations found.", log_file)
         return 0
 
     for inst in installs:
@@ -366,39 +479,35 @@ def run_poc_updates(args: argparse.Namespace, log_file: Path) -> int:
                 token,
             )
         except Exception as exc:
-            write_log(f"PoC release check failed for {miner_code}: {exc}", log_file)
+            write_log(f"[ERROR] PoC release check failed for {miner_code}: {exc}", log_file)
             continue
 
         asset = find_poc_asset(release, miner_code)
         if not asset:
-            write_log(f"No PoC asset for {miner_code} in latest release.", log_file)
+            write_log(f"[INFO] No PoC asset for {miner_code} in latest release.", log_file)
             continue
 
         installed_ver = normalize_version(inst["poc_version"])
         remote_ver = normalize_version(asset["version"])
         if compare_versions(remote_ver, installed_ver) <= 0:
-            write_log(
-                f"PoC up to date for {miner_code}: {installed_ver}",
-                log_file,
-            )
+            write_log(f"[INFO] PoC up to date for {miner_code}: {installed_ver}", log_file)
             continue
 
         write_log(
-            f"PoC update available for {miner_code}: {installed_ver} -> {remote_ver}",
+            f"[INFO] PoC update available for {miner_code}: {installed_ver} -> {remote_ver}",
             log_file,
         )
 
         if args.dry_run:
-            write_log(f"[dry-run] Would update PoC for {miner_code}", log_file)
+            write_log(f"[DRY-RUN] Would update PoC for {miner_code}", log_file)
             continue
 
-        # Download
         asset_url = asset["url"]
         if not asset_url:
-            write_log(f"PoC asset for {miner_code} missing download URL.", log_file)
+            write_log(f"[ERROR] PoC asset for {miner_code} missing download URL.", log_file)
             continue
         dest = Path(tempfile.gettempdir()) / asset["name"]
-        write_log(f"Downloading {asset_url} to {dest}", log_file)
+        write_log(f"[INFO] Downloading {asset_url} to {dest}", log_file)
         download(cast(str, asset_url), dest, token)
 
         # SHA256 verification
@@ -412,168 +521,214 @@ def run_poc_updates(args: argparse.Namespace, log_file: Path) -> int:
                 actual = sha256_file(dest)
                 if expected.lower() != actual.lower():
                     write_log(
-                        f"PoC checksum mismatch for {miner_code}: "
+                        f"[ERROR] PoC checksum mismatch for {miner_code}: "
                         f"expected {expected}, got {actual}",
                         log_file,
                     )
                     continue
-                write_log(f"PoC checksum verified for {miner_code}.", log_file)
+                write_log(f"[INFO] PoC checksum verified for {miner_code}.", log_file)
 
-        # Apply update
         try:
             update_poc_service(inst, dest, asset["version"], log_file)
         except Exception as exc:
             write_log(
-                f"ERROR: PoC update FAILED for {miner_code} "
+                f"[ERROR] PoC update FAILED for {miner_code} "
                 f"(service may be in partial state): {exc}",
                 log_file,
             )
     return 0
 
 
+# --- CLI ---
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Update FryNetworks Installer from latest GitHub release.")
-    p.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo owner/name (default: %(default)s)")
-    p.add_argument("--current-version", help="Current version (e.g., v3.6.0). If omitted, infer from installer exe name in the updater directory.")
-    p.add_argument("--token", help="GitHub token for higher rate limits/private repos (optional).")
-    p.add_argument("--quiet", action="store_true", help="Install MSI silently (/qn).")
-    p.add_argument("--log", type=Path, help="Log file path (default: %%LOCALAPPDATA%%/FryNetworks/Updater/updater.log).")
-    p.add_argument("--dry-run", action="store_true", help="Do not download/install, just report actions.")
-    p.add_argument("--update-poc", action="store_true",
-                   help="Also check/update PoC service binaries.")
-    p.add_argument("--poc-repo", default=DEFAULT_POC_REPO,
-                   help="GitHub repo for PoC releases (default: %(default)s)")
-    p.add_argument("--poc-token",
-                   help="GitHub token for PoC repo (falls back to --token / GITHUB_TOKEN).")
-    p.add_argument("--poc-config-dir", default=r"C:\ProgramData\FryNetworks",
-                   help="Parent dir containing miner-* subdirs (default: %(default)s)")
+    p = argparse.ArgumentParser(
+        description="Update FryNetworks Installer from Bunny CDN manifest."
+    )
+    p.add_argument(
+        "--manifest-url", default=None,
+        help="Bunny CDN manifest URL override (default: built-in production URL).",
+    )
+    p.add_argument(
+        "--current-version",
+        help="Current version (e.g., v1.0.0). If omitted, auto-discover from PE/config.",
+    )
+    p.add_argument(
+        "--token",
+        help="GitHub token for PoC repo (optional, for private repos).",
+    )
+    p.add_argument("--quiet", action="store_true", help="Suppress stdout output.")
+    p.add_argument(
+        "--log", type=Path, default=None,
+        help=f"Log file path (default: {DEFAULT_LOG_PATH}).",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Do not download/install, just report.")
+    p.add_argument(
+        "--update-poc", action="store_true",
+        help="Also check/update PoC service binaries.",
+    )
+    p.add_argument(
+        "--poc-repo", default=DEFAULT_POC_REPO,
+        help="GitHub repo for PoC releases (default: %(default)s)",
+    )
+    p.add_argument(
+        "--poc-token",
+        help="GitHub token for PoC repo (falls back to --token / GITHUB_TOKEN).",
+    )
+    p.add_argument(
+        "--poc-config-dir", default=DEFAULT_POC_CONFIG_DIR,
+        help="Parent dir containing miner-* subdirs (default: %(default)s)",
+    )
+    # Deprecated — kept for backward compat
+    p.add_argument("--repo", default=DEFAULT_REPO, help=argparse.SUPPRESS)
     return p.parse_args()
 
 
-def compare_versions(a: str, b: str) -> int:
-    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples."""
-    def tup(s):
-        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
-        parts = s.split(".") if s else []
-        out = []
-        for p in parts:
-            try:
-                out.append(int(p))
-            except ValueError:
-                out.append(0)
-        return tuple(out)
-    ta, tb = tup(a), tup(b)
-    if ta < tb: return -1
-    if ta > tb: return 1
-    return 0
-
+# --- Main ---
 
 def main() -> int:
     args = parse_args()
-    log_file = log_path(args.log)
+    log_file = args.log or DEFAULT_LOG_PATH
+    quiet = args.quiet
+
+    write_log("=" * 60, log_file)
+    write_log("[INFO] FryNetworks Updater started", log_file)
+
+    # --- Backfill PoC discovery fields (idempotent) ---
+    try:
+        from tools.config_backfill import backfill_poc_discovery_fields
+    except ImportError:
+        try:
+            # When running as frozen exe, module may be at top level
+            from config_backfill import backfill_poc_discovery_fields
+        except ImportError:
+            backfill_poc_discovery_fields = None
+
+    if backfill_poc_discovery_fields:
+        try:
+            bf_result = backfill_poc_discovery_fields(
+                base_dir=args.poc_config_dir,
+                dry_run=args.dry_run,
+            )
+            updated = bf_result.get("updated", []) + bf_result.get("created", [])
+            if updated:
+                write_log(f"[INFO] Backfill touched {len(updated)} config(s)", log_file)
+        except Exception as e:
+            write_log(f"[WARN] Backfill failed (non-fatal): {e}", log_file)
+
+    # --- Version discovery ---
+    current_version = discover_installer_version(
+        args.current_version, args.poc_config_dir, log_file
+    )
+    if not current_version:
+        log_and_print("CANNOT_DETERMINE_INSTALLER_VERSION", log_file, quiet)
+        if args.update_poc:
+            write_log("[INFO] Version unknown; proceeding with PoC update only.", log_file)
+            return run_poc_updates(args, log_file)
+        return 7
+
+    log_and_print(f"Current version: {current_version}", log_file, quiet)
+
+    # --- Fetch Bunny CDN manifest ---
+    manifest_url = args.manifest_url or DEFAULT_MANIFEST_URL
+    write_log(f"[INFO] Fetching manifest from {manifest_url}", log_file)
+    manifest = fetch_manifest(manifest_url, log_file)
+
+    if not manifest:
+        # fetch_manifest already logged the error
+        if args.update_poc:
+            poc_rc = run_poc_updates(args, log_file)
+            return poc_rc if poc_rc != 0 else 2
+        return 2
+
+    remote_ver = normalize_version(manifest["version"])
+    write_log(f"[INFO] Latest available: {remote_ver}", log_file)
+
+    # --- Compare versions ---
+    cmp = compare_versions(remote_ver, current_version)
+    if cmp <= 0:
+        log_and_print(f"No update needed (current={current_version}, latest={remote_ver}).", log_file, quiet)
+        if args.update_poc:
+            return run_poc_updates(args, log_file)
+        return 0
+
+    log_and_print(
+        f"Update available: {current_version} -> {remote_ver}",
+        log_file, quiet,
+    )
+
+    if args.dry_run:
+        write_log(f"[DRY-RUN] Would download {manifest['download_url']}", log_file)
+        log_and_print("[DRY-RUN] Skipping download and install.", log_file, quiet)
+        if args.update_poc:
+            return run_poc_updates(args, log_file)
+        return 0
+
+    # --- Download installer ---
+    filename = manifest.get("filename", "frynetworks_installer.exe")
+    dest = Path(tempfile.gettempdir()) / filename
+
+    write_log(f"[INFO] Downloading {manifest['download_url']} to {dest}", log_file)
+    log_and_print("Downloading update...", log_file, quiet)
 
     try:
-        current_version = discover_installer_version(args.current_version, log_file)
-        if not current_version:
-            print("CANNOT_DETERMINE_INSTALLER_VERSION")
-            if args.update_poc:
-                write_log("Installer version unknown; proceeding with PoC update only.", log_file)
-                return run_poc_updates(args, log_file)
-            return 2
-        write_log(f"Current version: {current_version}", log_file)
-        print(f"Checking for updates... (current: {current_version})")
-
-        token = args.token or os.environ.get("GITHUB_TOKEN") or DEFAULT_EMBEDDED_TOKEN or None
-
-        release = fetch_json(f"https://api.github.com/repos/{args.repo}/releases/latest", token)
-        remote_ver = normalize_version(release.get("tag_name", ""))
-        write_log(f"Latest release: {remote_ver}", log_file)
-
-        if not remote_ver:
-            write_log(
-                "Could not parse remote version. Refusing to update.",
-                log_file,
-            )
-            print("Could not determine remote version.")
-            if args.update_poc:
-                return run_poc_updates(args, log_file)
-            return 1
-
-        cmp = compare_versions(remote_ver, current_version)
-        if cmp <= 0:
-            write_log(
-                f"Remote v{remote_ver} is not newer than current v{current_version}. "
-                "No update needed (downgrade refused).",
-                log_file,
-            )
-            print("No update needed.")
-            if args.update_poc:
-                return run_poc_updates(args, log_file)
-            return 0
-
-        installer_asset = find_installer_asset(release)
-        if not installer_asset:
-            write_log("No installer asset found in latest release.", log_file)
-            if args.update_poc:
-                return run_poc_updates(args, log_file)
-            return 1
-
-        msi_url = installer_asset.get("browser_download_url")
-        if not msi_url:
-            write_log("Installer asset missing download URL.", log_file)
-            if args.update_poc:
-                return run_poc_updates(args, log_file)
-            return 1
-        msi_name = installer_asset.get("name", "update.exe")
-        dest = Path(tempfile.gettempdir()) / msi_name
-
-        if args.dry_run:
-            write_log(f"[dry-run] Would download {msi_url} to {dest}", log_file)
-            return 0
-
-        write_log(f"Downloading {msi_url} to {dest}", log_file)
-        print("Downloading update...")
-        download(cast(str, msi_url), dest, token)
-
-        sha_asset_name = (installer_asset.get("name", "") + ".sha256").lower()
-        sha_asset = next(
-            (a for a in release.get("assets", [])
-             if a.get("name", "").lower() == sha_asset_name),
-            None,
-        )
-        if sha_asset:
-            sha_url = sha_asset.get("browser_download_url")
-            if not sha_url:
-                write_log("Checksum asset missing download URL; skipping checksum verification.", log_file)
-            else:
-                sha_dest = dest.with_suffix(dest.suffix + ".sha256")
-                write_log(f"Downloading checksum {sha_url}", log_file)
-                download(cast(str, sha_url), sha_dest, token)
-                expected = sha_dest.read_text().split()[0].strip()
-                actual = sha256_file(dest)
-                if expected.lower() != actual.lower():
-                    write_log(f"Checksum mismatch: expected {expected}, got {actual}", log_file)
-                    if args.update_poc:
-                        return run_poc_updates(args, log_file)
-                    return 1
-            write_log("Checksum verified.", log_file)
-
-        print("Launching installer...")
-        run_installer(dest, args.quiet, log_file)
-        write_log("Update triggered (msiexec launched).", log_file)
-
+        download(manifest["download_url"], dest)
+    except Exception as e:
+        write_log(f"[ERROR] Download failed: {e}", log_file)
+        # Clean up partial file
+        try:
+            if dest.exists():
+                dest.unlink()
+        except Exception:
+            pass
         if args.update_poc:
-            poc_result = run_poc_updates(args, log_file)
-            if poc_result != 0:
-                return poc_result
+            poc_rc = run_poc_updates(args, log_file)
+            return poc_rc if poc_rc != 0 else 4
+        return 4
 
-        return 0
-    except urllib.error.HTTPError as e:
-        write_log(f"HTTP error: {e}", log_file)
-        return 1
-    except Exception as e:  # noqa: BLE001
-        write_log(f"Update failed: {e}", log_file)
-        return 1
+    # --- SHA256 verification ---
+    expected_sha = manifest["sha256"].lower()
+    actual_sha = sha256_file(dest)
+    if expected_sha != actual_sha.lower():
+        write_log(
+            f"[ERROR] SHA256 MISMATCH — expected: {expected_sha}, got: {actual_sha}",
+            log_file,
+        )
+        # Delete the unverified binary
+        try:
+            dest.unlink()
+        except Exception:
+            pass
+        log_and_print("SHA256 verification failed. Update aborted.", log_file, quiet)
+        if args.update_poc:
+            poc_rc = run_poc_updates(args, log_file)
+            return poc_rc if poc_rc != 0 else 5
+        return 5
+
+    write_log(f"[INFO] SHA256 verified: {actual_sha}", log_file)
+
+    # --- Run installer (BLOCKING) ---
+    log_and_print("Launching installer...", log_file, quiet)
+    exit_code = run_installer(dest, quiet, log_file)
+
+    if exit_code != 0:
+        write_log(
+            f"[ERROR] Installer exited with code {exit_code}. Services may be stopped.",
+            log_file,
+        )
+        if args.update_poc:
+            run_poc_updates(args, log_file)
+        return 6
+
+    write_log("[INFO] Installer completed successfully.", log_file)
+
+    # --- PoC updates ---
+    if args.update_poc:
+        poc_rc = run_poc_updates(args, log_file)
+        if poc_rc != 0:
+            return poc_rc
+
+    return 0
 
 
 if __name__ == "__main__":

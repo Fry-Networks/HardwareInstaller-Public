@@ -1,10 +1,10 @@
-# Registers or removes the FryNetworks updater scheduled task (per-user, no elevation popup).
+# Registers or removes the FryNetworks updater scheduled task.
+# The updater auto-discovers version from installed configs (no --current-version needed).
 param(
-    [string]$UpdaterPath = "C:\Program Files (x86)\FryNetworks Installer\updater.exe",
+    [string]$UpdaterPath = "C:\ProgramData\FryNetworks\updater\frynetworks_updater.exe",
     [string]$TaskName = "FryNetworksUpdater",
     [switch]$Remove = $false,
     [switch]$RunNow = $false,
-    [string]$GitHubToken = $null,
     [string]$LogPath = "$env:TEMP\fry_updater_task.log"
 )
 
@@ -38,15 +38,7 @@ try {
         throw "Updater not found at $UpdaterPath"
     }
 
-    if ($GitHubToken) {
-        # Wrap the updater to inject GITHUB_TOKEN into the task environment
-        $action = New-ScheduledTaskAction `
-            -Execute "powershell.exe" `
-            -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"& { \$env:GITHUB_TOKEN = '$GitHubToken'; & '$UpdaterPath' --quiet }`"" `
-            -WorkingDirectory (Split-Path $UpdaterPath)
-    } else {
-        $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--quiet --update-poc" -WorkingDirectory (Split-Path $UpdaterPath)
-    }
+    $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--quiet --update-poc" -WorkingDirectory (Split-Path $UpdaterPath)
     $triggers = @(
         New-ScheduledTaskTrigger -AtLogOn
         New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
