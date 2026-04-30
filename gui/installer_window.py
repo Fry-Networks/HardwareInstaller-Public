@@ -908,12 +908,25 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     try:
                         cfg_dir = Path(install_dir) / 'config'
                         cfg_dir.mkdir(exist_ok=True)
-                        installer_cfg = {
+                        cfg_path = cfg_dir / 'installer_config.json'
+                        # Read-merge-write: preserve miner_code, poc_version, etc.
+                        existing_cfg = {}
+                        if cfg_path.exists():
+                            try:
+                                existing_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                            except (json.JSONDecodeError, ValueError):
+                                pass  # non-fatal in GUI welcome-data path
+                        merged = existing_cfg.copy()
+                        merged.update({
                             'version_platform': version_platform,
                             'installer_version': version_str or "",
-                        }
-                        with (cfg_dir / 'installer_config.json').open('w', encoding='utf-8') as jf:
-                            json.dump(installer_cfg, jf, indent=2)
+                        })
+                        tmp_path = cfg_path.with_suffix('.json.tmp')
+                        tmp_path.write_text(
+                            json.dumps(merged, indent=2) + '\n', encoding='utf-8'
+                        )
+                        import os as _os
+                        _os.replace(str(tmp_path), str(cfg_path))
                     except Exception:
                         pass
             except Exception:
@@ -5474,15 +5487,13 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                             shutil.copy2(str(updater_src), str(updater_dest))
                             self._debug_log(f"Updater exe staged to {updater_dest}")
 
-                            from version import WINDOWS_VERSION
-                            current_ver = f"v{WINDOWS_VERSION}" if not WINDOWS_VERSION.startswith("v") else WINDOWS_VERSION
                             updater_path_escaped = str(updater_dest).replace("'", "''")
 
                             register_cmd = f'''
-$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --current-version {current_ver} --update-poc' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
+$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --update-poc' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
-$triggerDaily = New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
+$triggerDaily = New-ScheduledTaskTrigger -Daily -At 2:00AM -RandomDelay (New-TimeSpan -Minutes 30)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries -StartWhenAvailable
 Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Highest -Force | Out-Null
 '''
                             subprocess.run(

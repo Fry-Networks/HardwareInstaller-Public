@@ -802,16 +802,33 @@ class WindowsServiceManager:
             with open(new_config_path, 'w') as cf:
                 json.dump(encrypted_config, cf)
 
-            # Also write a plaintext installer_config.json for GUI/service shared settings
+            # Write plaintext installer_config.json — read-merge-write to preserve
+            # existing fields (miner_code, poc_version) needed by updater PoC discovery
             try:
-                installer_cfg = {
+                cfg_path = config_dir / "installer_config.json"
+                existing_cfg = {}
+                if cfg_path.exists():
+                    try:
+                        existing_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, ValueError) as e:
+                        raise RuntimeError(
+                            f"installer_config.json is malformed at {cfg_path}: {e}"
+                        )
+                new_fields = {
                     "install_id": install_id,
                     "installer_version": installer_version,
                     "version_platform": version_platform or "",
                     "created_at": config_data.get("created_at"),
                 }
-                with open(config_dir / "installer_config.json", 'w', encoding='utf-8') as jf:
-                    json.dump(installer_cfg, jf, indent=2)
+                merged = existing_cfg.copy()
+                merged.update(new_fields)
+                tmp_path = cfg_path.with_suffix(".json.tmp")
+                tmp_path.write_text(
+                    json.dumps(merged, indent=2) + "\n", encoding="utf-8"
+                )
+                os.replace(str(tmp_path), str(cfg_path))
+            except RuntimeError:
+                raise
             except Exception:
                 # Non-fatal: continue even if plaintext config cannot be written
                 pass
@@ -849,12 +866,28 @@ class WindowsServiceManager:
             except Exception:
                 pass
             cfg_path = config_dir / "installer_config.json"
-            data = {
+            # Read-merge-write: preserve existing fields (miner_code, poc_version, etc.)
+            existing = {}
+            if cfg_path.exists():
+                try:
+                    existing = json.loads(cfg_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, ValueError):
+                    import sys
+                    print(
+                        f"[ERROR] installer_config.json malformed at {cfg_path}, refusing overwrite",
+                        file=sys.stderr,
+                    )
+                    return False
+            data = existing.copy()
+            data.update({
                 "version_platform": vp,
                 "installer_version": installer_version or "",
-            }
-            with open(cfg_path, 'w', encoding='utf-8') as jf:
-                json.dump(data, jf, indent=2)
+            })
+            tmp_path = cfg_path.with_suffix(".json.tmp")
+            tmp_path.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            os.replace(str(tmp_path), str(cfg_path))
             return True
         except Exception:
             return False

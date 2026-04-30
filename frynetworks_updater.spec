@@ -3,7 +3,7 @@
 
 a = Analysis(
     ['tools\\updater.py'],
-    pathex=['.'],
+    pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=[],
