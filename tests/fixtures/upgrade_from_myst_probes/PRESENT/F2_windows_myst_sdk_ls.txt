@@ -1,0 +1,7 @@
+total 58368
+drwxr-xr-x 1 saf70 197121        0 Apr 26 14:33 .
+drwxr-xr-x 1 saf70 197121        0 Apr 26 14:33 ..
+drwxr-xr-x 1 saf70 197121        0 Apr 26 14:28 config
+-rwxr-xr-x 1 saf70 197121 51998720 Apr 26 14:28 myst.exe
+-rwxr-xr-x 1 saf70 197121  7770112 Apr 26 14:28 myst_supervisor.exe
+EXIT=0

@@ -75,6 +75,8 @@ Examples:
     parser.add_argument('--version', action='version', version='Fry Networks Installer 1.0.0')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose output')
+    parser.add_argument('--quiet', action='store_true',
+                       help='Suppress dialogs; used by updater for silent upgrade')
     
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -93,6 +95,22 @@ Examples:
                               help='Configure service to start automatically')
     install_parser.add_argument('--resolve-conflicts', choices=['replace', 'abort', 'force'],
                               default='abort', help='How to handle conflicts')
+    class _DeprecatedTosAlias(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            if option_string == "--accept-mysterium-tos":
+                sys.stderr.write(
+                    "DeprecationWarning: --accept-mysterium-tos is deprecated. "
+                    "Use --accept-mystnodes-sdk-tos. Both still work this release.\n"
+                )
+            setattr(namespace, self.dest, True)
+
+    install_parser.add_argument(
+        '--accept-mysterium-tos', '--accept-mystnodes-sdk-tos',
+        dest='accept_tos', action=_DeprecatedTosAlias, nargs=0,
+        help='Accept MystNodes SDK terms of service (--accept-mysterium-tos: deprecated alias)',
+    )
+    install_parser.add_argument('--quiet', action='store_true',
+                              help='Suppress dialogs; defer TOS to GUI catch-up')
     
     # Validate command  
     validate_parser = subparsers.add_parser('validate', help='Validate a miner key')
@@ -423,7 +441,8 @@ def launch_gui(args):
 
         _slog.info("About to create FryNetworksInstallerWindow")
         window = FryNetworksInstallerWindow()
-        _slog.info("FryNetworksInstallerWindow created successfully")
+        window._quiet_mode = getattr(args, 'quiet', False)
+        _slog.info("FryNetworksInstallerWindow created successfully (quiet=%s)", window._quiet_mode)
         
         # Connect the local server to handle quit requests from new instances
         def handle_new_connection():
@@ -494,13 +513,16 @@ def launch_gui(args):
 
 def handle_install(args):
     """Handle installation command."""
+    return install_miner(args)
 from core.key_parser import MinerKeyParser
 from core.conflict_detector import ConflictDetector
 from core.service_manager import ServiceManager
 from core.config_manager import ConfigManager
 
 # Import external API client from tools package
-from tools.external_api import ExternalApiClient, _BUILD_CONFIG
+from tools.external_api import ExternalApiClient, _BUILD_CONFIG, get_external_api_client
+from core.mystnodes_sdk_provisioning import provision_mystnodes_sdk_at_install, cleanup_mystnodes_sdk_on_failure
+from core.upgrade_from_myst import upgrade_from_myst_at_install
 
 
 def load_env():
@@ -721,9 +743,8 @@ def install_miner(args):
     # Public build: Mysterium is the sole partner integration (mandatory for BM)
 
     # Check for conflicts with External API
-    api_base_url = get_api_base_url()
-    api_client = ExternalApiClient(api_base_url)
-    print(f"✓ External API connected: {api_base_url}")
+    api_client = get_external_api_client()
+    print(f"✓ External API connected: {api_client.base_url}")
     
     detector = ConflictDetector(api_client=api_client)
     conflicts = detector.check_device_conflicts(args.key)
@@ -799,6 +820,16 @@ def install_miner(args):
         # TODO: Implement dependency installation
         print("Dependency installation not yet implemented")
     
+    # MystNodes SDK TOS handling (Track 4 — was Mysterium TOS in Track 3)
+    accept_tos = getattr(args, 'accept_tos', False)
+    quiet = getattr(args, 'quiet', False)
+    if is_bandwidth_miner and quiet and not accept_tos:
+        sdk_opt_in = False  # defer to GUI catch-up
+    elif is_bandwidth_miner and accept_tos:
+        sdk_opt_in = True
+    else:
+        sdk_opt_in = False  # non-BM always False
+
     # Install service
     print("\\nInstalling service...")
     service_manager = ServiceManager(key_info["code"])
@@ -806,13 +837,62 @@ def install_miner(args):
         args.key,
         auto_start=args.auto_start,
         system_wide=args.system_wide,
-        mysterium_opt_in=is_bandwidth_miner,
+        sdk_opt_in=sdk_opt_in,
+        _stage_partner_sdks={"mystnodes_sdk": True} if sdk_opt_in else {},
     )
-    
+
     if install_result["success"]:
         print(f"✓ {install_result['message']}")
         for action in install_result.get("actions", []):
             print(f"  • {action}")
+
+        # Write tos_state.json (Track 3) — read-before-write to preserve existing acceptance
+        if is_bandwidth_miner:
+            from core.tos_state import write_tos_state, read_tos_state, is_resolved_accept
+            config_dir = config_manager.get_installation_directory(
+                getattr(args, 'system_wide', False)
+            ) / "config"
+            if quiet and not accept_tos:
+                existing = read_tos_state(config_dir)
+                if not is_resolved_accept(existing):
+                    write_tos_state(config_dir, accepted_via="installer-quiet-deferred",
+                                    tos_pending_catchup=True)
+            elif accept_tos:
+                write_tos_state(config_dir, accepted_via="installer-interactive")
+
+            if sdk_opt_in and is_bandwidth_miner:
+                base_dir = config_dir.parent
+                nssm_path = base_dir / "nssm.exe"
+
+                if not nssm_path.exists():
+                    print("✗ MystNodes SDK provisioning skipped — nssm.exe missing")
+                    return 1
+
+                # Legacy Mysterium teardown (Fix #2b) — must run before SDK provisioning
+                print("→ Checking for legacy Mysterium installation...")
+                upgrade_result = upgrade_from_myst_at_install(
+                    install_root=base_dir,
+                    nssm_path=nssm_path,
+                    progress_callback=lambda msg: print(f"  {msg}"),
+                )
+                if upgrade_result.failed:
+                    print(f"✗ Legacy Mysterium upgrade failed: {upgrade_result.error}")
+                    return 1
+                if upgrade_result.upgrade_performed:
+                    print("✓ Legacy Mysterium teardown complete")
+
+                print("→ Provisioning MystNodes SDK Client...")
+                result = provision_mystnodes_sdk_at_install(
+                    install_root=base_dir,
+                    nssm_path=nssm_path,
+                    progress_callback=lambda label, status: print(f"  [{label}] {status}"),
+                )
+                if not result.success:
+                    print(f"✗ MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
+                    cleanup_mystnodes_sdk_on_failure(base_dir, nssm_path)
+                    return 1
+                print("✓ MystNodes SDK provisioning complete")
+
         return 0
     else:
         print(f"✗ {install_result['message']}")
@@ -840,8 +920,7 @@ def handle_validate(args):
     
     # Validate with External API
     try:
-        api_base_url = get_api_base_url()
-        api_client = ExternalApiClient(api_base_url)
+        api_client = get_external_api_client()
         
         print(f"\\n🔍 Validating with External API...")
         miner_profile = api_client.get_miner_profile(args.key)
