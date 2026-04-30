@@ -151,11 +151,12 @@ def _step_set_token_param(install_root: Path, nssm_path: Path, token: str) -> St
     params = f"--user.token={token} --log.level={SDK_CLI_LOG_LEVEL}"
     cmd = [str(nssm_path), "set", SDK_SERVICE_NAME, "AppParameters", params]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+        result = subprocess.run(cmd, capture_output=True, timeout=15, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return StepResult(False, "4/6", f"nssm set AppParameters failed: {exc}")
     if result.returncode != 0:
-        sanitized = result.stderr.replace(token, "<REDACTED>") if token else result.stderr
+        stderr = (result.stderr or b"").decode("utf-16-le", errors="replace")
+        sanitized = stderr.replace(token, "<REDACTED>") if token else stderr
         return StepResult(False, "4/6", f"nssm set AppParameters rc={result.returncode}: {sanitized[:300]}")
     return StepResult(True, "4/6")
 
@@ -206,14 +207,16 @@ def _step_start_service(install_root: Path, nssm_path: Path) -> StepResult:
     while time.time() < deadline:
         status_cmd = [str(nssm_path), "status", SDK_SERVICE_NAME]
         try:
-            status = subprocess.run(status_cmd, capture_output=True, text=True, timeout=10, check=False)
+            status = subprocess.run(status_cmd, capture_output=True, timeout=10, check=False)
         except (OSError, subprocess.SubprocessError):
             time.sleep(2)
             continue
-        if "SERVICE_RUNNING" in (status.stdout or ""):
+        stdout = (status.stdout or b"").decode("utf-16-le", errors="replace")
+        if "SERVICE_RUNNING" in stdout:
             time.sleep(5)
-            re_check = subprocess.run(status_cmd, capture_output=True, text=True, timeout=10, check=False)
-            if "SERVICE_RUNNING" in (re_check.stdout or ""):
+            re_check = subprocess.run(status_cmd, capture_output=True, timeout=10, check=False)
+            _stdout = (re_check.stdout or b"").decode("utf-16-le", errors="replace")
+            if "SERVICE_RUNNING" in _stdout:
                 return StepResult(True, "6/6")
         time.sleep(2)
     return StepResult(False, "6/6", "service did not reach sustained SERVICE_RUNNING within 30s")
