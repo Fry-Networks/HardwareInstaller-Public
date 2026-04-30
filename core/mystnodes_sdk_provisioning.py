@@ -22,6 +22,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +58,7 @@ def _read_token_from_build_config(install_root: Path) -> Optional[str]:
     build_installer.ps1 reads op://Bandwidth Miners/Mysterium SDK API/MYST_REG_TOKEN and
     embeds under partner_integrations.mystnodes_sdk.reg_token at build time.
     """
-    cfg_path = install_root / "build_config.json"
+    cfg_path = Path(getattr(sys, "_MEIPASS", ".")) / "build_config.json"
     if not cfg_path.exists():
         LOGGER.error("build_config.json missing at %s", cfg_path)
         return None
