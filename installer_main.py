@@ -716,6 +716,17 @@ def launch_gui(args):
         # Create and run GUI application
         app = QtWidgets.QApplication(sys.argv)
         _slog.info("QApplication created")
+
+        # Close PyInstaller splash before any modal dialog can be displayed.
+        # Without this, QMessageBox.exec() at L284 (update prompt) and L612
+        # (downgrade prompt) hang indefinitely because the bootloader splash
+        # overlay sits above all Qt windows.
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except ImportError:
+            pass  # not a frozen PyInstaller bundle (dev mode)
+
         app.setApplicationName("Fry Hub")
         app.setApplicationVersion("1.0.0")
         
