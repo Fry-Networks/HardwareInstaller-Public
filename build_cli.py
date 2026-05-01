@@ -417,6 +417,27 @@ Examples:
         action="store_true",
         help="On Windows, also build an Inno Setup installer after building the EXE"
     )
+    bunny_grp = parser.add_mutually_exclusive_group()
+    bunny_grp.add_argument(
+        "--upload-hub",
+        action="store_true",
+        help="Upload dist/FryHubSetup-{ver}.exe to Bunny CDN"
+    )
+    bunny_grp.add_argument(
+        "--rollback-hub",
+        metavar="VERSION",
+        help="Rollback Hub manifest to point at archived VERSION"
+    )
+    parser.add_argument(
+        "--min-required",
+        metavar="VERSION",
+        help="Set min_required in hub manifest (force-update threshold)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing CDN artifact"
+    )
 
     args = parser.parse_args()
     
@@ -424,7 +445,17 @@ Examples:
     if args.show:
         show_version_info()
         return 0
-    
+
+    # Standalone rollback (no build needed)
+    if args.rollback_hub:
+        from tools.bunny_upload import rollback_hub
+        try:
+            rollback_hub(args.rollback_hub)
+            return 0
+        except Exception as e:
+            print(f"Rollback failed: {e}", file=sys.stderr)
+            return 1
+
     target_platform = _detect_platform()
     current_version = get_current_version(target_platform)
     print(f"Current {target_platform} version: {current_version}")
@@ -506,6 +537,17 @@ Examples:
             except Exception as e:
                 print(f"Inno build failed: {e}")
                 build_failures.append("Inno")
+        if args.upload_hub:
+            from tools.bunny_upload import upload_hub
+            exe_name = f"FryHubSetup-{target_version}.exe"
+            exe_path = Path("dist") / exe_name
+            try:
+                upload_hub(target_version, exe_path,
+                           min_required=args.min_required,
+                           force=args.force)
+            except Exception as e:
+                print(f"Upload failed: {e}", file=sys.stderr)
+                build_failures.append("Upload")
         if build_failures:
             print(f"Post-build packaging failed: {', '.join(build_failures)}")
             return 1
