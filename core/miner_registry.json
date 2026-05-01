@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "miners": [
+    {
+      "code": "BM",
+      "name": "Bandwidth Miner",
+      "group": "BM",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": false
+    },
+    {
+      "code": "IDM",
+      "name": "Indoor Decibel Miner",
+      "group": "Decibel",
+      "exclusive": "ODM",
+      "requires_installer": true,
+      "requires_stake": false
+    },
+    {
+      "code": "ODM",
+      "name": "Outdoor Decibel Miner",
+      "group": "Decibel",
+      "exclusive": "IDM",
+      "requires_installer": true,
+      "requires_stake": false
+    },
+    {
+      "code": "ISM",
+      "name": "Indoor Satellite Miner",
+      "group": "Satellite",
+      "exclusive": "OSM",
+      "requires_installer": true,
+      "requires_stake": false
+    },
+    {
+      "code": "OSM",
+      "name": "Outdoor Satellite Miner",
+      "group": "Satellite",
+      "exclusive": "ISM",
+      "requires_installer": true,
+      "requires_stake": false
+    },
+    {
+      "code": "RDN",
+      "name": "Compute Node",
+      "group": "RDN",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": true
+    },
+    {
+      "code": "SVN",
+      "name": "Storage Validator Node",
+      "group": "SVN",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": true
+    },
+    {
+      "code": "SDN",
+      "name": "Storage Decentralization Node",
+      "group": "SDN",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": true
+    },
+    {
+      "code": "AEM",
+      "name": "AI Edge Miner",
+      "group": "AEM",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": true
+    },
+    {
+      "code": "IRM",
+      "name": "Indoor Radiation Miner",
+      "group": "Radiation",
+      "exclusive": null,
+      "requires_installer": true,
+      "requires_stake": true
+    }
+  ]
+}
