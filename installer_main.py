@@ -54,6 +54,7 @@ try:
     from tools.external_api import ExternalApiClient
     from tools.banner import TopBanner
     from tools.theme import Theme
+    from core.hub_config import hub_config_path, read_hub_config, write_hub_config
 except ImportError as e:
     print(f"Warning: Failed to import some modules: {e}")
     # Continue anyway - we'll try to import them again later
@@ -90,41 +91,6 @@ _HUB_MANIFEST_URL = (
     "frynetworks-installer/hub/latest/fryhub_version.json"
 )
 _HUB_MANIFEST_REQUIRED = ("manifest_version", "hub_version", "setup_url", "setup_sha256")
-
-
-def _hub_config_path() -> Path:
-    return (
-        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
-        / "FryNetworks"
-        / "hub_config.json"
-    )
-
-
-def _read_hub_config() -> dict:
-    defaults = {
-        "auto_update_hub": False,
-        "last_update_check_at": None,
-        "last_seen_hub_version": None,
-    }
-    try:
-        text = _hub_config_path().read_text(encoding="utf-8")
-        data = json.loads(text)
-        if isinstance(data, dict):
-            defaults.update(data)
-    except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError):
-        pass
-    return defaults
-
-
-def _write_hub_config(config: dict) -> None:
-    path = _hub_config_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        os.replace(str(tmp), str(path))
-    except (PermissionError, OSError) as exc:
-        _logger.warning("Could not write hub_config.json: %s", exc)
 
 
 def _sha256_file(path: Path) -> str:
@@ -225,15 +191,15 @@ def _attempt_hub_update_check_inner(args) -> None:
         _logger.debug("tasklist check failed (%s); proceeding with check", exc)
 
     # 3. Read hub config
-    config = _read_hub_config()
+    config = read_hub_config()
 
     # 4. Handle CLI config-persist flags
     if getattr(args, "auto_update_hub", False):
         config["auto_update_hub"] = True
-        _write_hub_config(config)
+        write_hub_config(config)
     elif getattr(args, "no_auto_update_hub", False):
         config["auto_update_hub"] = False
-        _write_hub_config(config)
+        write_hub_config(config)
 
     # 5. Fetch manifest (404 on first-ever deploy = silent no-op)
     manifest = _fetch_hub_manifest(timeout=5)
@@ -330,14 +296,14 @@ def _attempt_hub_update_check_inner(args) -> None:
                 config["auto_update_hub"] = True
             config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
             config["last_seen_hub_version"] = new_ver
-            _write_hub_config(config)
+            write_hub_config(config)
             _launch_hub_setup_and_exit(setup, config, manifest)
             return
         else:
             # Skip or Exit
             config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
             config["last_seen_hub_version"] = new_ver
-            _write_hub_config(config)
+            write_hub_config(config)
             if force_update:
                 sys.exit(0)  # Required update refused — exit before event loop
             return  # Skip — Hub launches normally
@@ -367,7 +333,7 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict) ->
         )
         config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
         config["last_seen_hub_version"] = manifest["hub_version"]
-        _write_hub_config(config)
+        write_hub_config(config)
         sys.exit(0)
     except Exception as exc:
         _logger.error("Failed to launch FryHubSetup: %s", exc)
@@ -467,12 +433,16 @@ Examples:
     
     # Uninstall command
     uninstall_parser = subparsers.add_parser('uninstall', help='Uninstall a miner')
-    uninstall_parser.add_argument('--miner-code', required=True,
-                                help='Miner code to uninstall')
+    uninstall_group = uninstall_parser.add_mutually_exclusive_group(required=True)
+    uninstall_group.add_argument('--miner-code', help='Miner code to uninstall')
+    uninstall_group.add_argument('--all', action='store_true', dest='uninstall_all',
+                                help='Uninstall all installed miners')
     uninstall_parser.add_argument('--system-wide', action='store_true',
                                 help='Uninstall from system-wide location')
     uninstall_parser.add_argument('--remove-data', action='store_true',
                                 help='Remove all data and configuration')
+    uninstall_parser.add_argument('-y', '--yes', action='store_true',
+                                help='Skip confirmation prompts (for headless invocation)')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List installed miners')
@@ -1362,34 +1332,107 @@ def handle_service(args):
     return 0
 
 
-def handle_uninstall(args):
-    """Handle uninstall command."""
+def _uninstall_single(miner_code: str, system_wide: bool, remove_data: bool):
+    """Uninstall one miner. Extracted for --all iteration."""
     from core.service_manager import ServiceManager
     from core.config_manager import ConfigManager
-    
-    print(f"Uninstalling {args.miner_code} miner...")
-    
-    # Stop and remove service
-    service_manager = ServiceManager(args.miner_code)
+
+    service_manager = ServiceManager(miner_code)
     result = service_manager.uninstall_service()
-    
     if result["success"]:
         print(f"✓ {result['message']}")
         for action in result.get("actions", []):
             print(f"  • {action}")
     else:
         print(f"⚠ Service removal: {result['message']}")
-    
-    # Remove configuration if requested
-    if args.remove_data:
-        config_manager = ConfigManager(args.miner_code)
-        config_result = config_manager.remove_configuration(args.system_wide)
-        
+
+    if remove_data:
+        config_manager = ConfigManager(miner_code)
+        config_result = config_manager.remove_configuration(system_wide)
         if config_result["success"]:
             print("✓ Configuration and data removed")
         else:
             print(f"⚠ Configuration removal failed: {config_result['errors']}")
-    
+
+
+def _remove_updater_task():
+    """Remove FryNetworksUpdater scheduled task. No-op if not found."""
+    if os.name != 'nt':
+        return
+    result = subprocess.run(
+        ["schtasks", "/delete", "/tn", "FryNetworksUpdater", "/f"],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print("✓ FryNetworksUpdater scheduled task removed")
+    else:
+        print("  (FryNetworksUpdater task not found or already removed)")
+
+
+def _remove_hub_data_root():
+    """Remove %PROGRAMDATA%\\FryNetworks root when --all --remove-data.
+
+    Called AFTER all per-miner removals complete. Per-miner uninstall removes
+    its own subdir; this removes the rest (hub_config, cache, updater dir).
+    """
+    import shutil
+    root = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "FryNetworks"
+    if root.exists():
+        try:
+            shutil.rmtree(root)
+            print(f"✓ Removed {root}")
+        except Exception as exc:
+            print(f"⚠ Could not remove {root}: {exc}")
+
+
+def handle_uninstall(args):
+    """Handle uninstall command."""
+    from core.config_manager import ConfigManager
+
+    if args.uninstall_all:
+        config_manager = ConfigManager()
+        installations = config_manager.detect_existing_installations()
+        if not installations:
+            print("No miner installations found — nothing to uninstall")
+            return 0
+
+        # Destructive confirmation for --all --remove-data unless -y
+        if args.remove_data and not args.yes:
+            print("This will remove ALL miner installations AND wipe %PROGRAMDATA%\\FryNetworks\\.")
+            print("Type 'yes' to continue, anything else to abort:")
+            if input().strip().lower() != 'yes':
+                print("Aborted.")
+                return 1
+
+        print(f"Uninstalling {len(installations)} miner(s)...")
+        failures = []
+        for install in installations:
+            code = install["miner_code"]
+            sw = install["system_wide"]  # per-install, NOT from CLI --system-wide
+            print(f"\n--- {code} ({'system' if sw else 'user'}) ---")
+            try:
+                _uninstall_single(code, sw, args.remove_data)
+            except Exception as e:
+                print(f"⚠ Failed to uninstall {code}: {e}")
+                failures.append((code, str(e)))
+
+        # Scheduled task removal AFTER all miners
+        _remove_updater_task()
+
+        # Hub data root removal AFTER per-miner removals, BEFORE return
+        if args.remove_data:
+            _remove_hub_data_root()
+
+        if failures:
+            print(f"\n⚠ {len(failures)} miner(s) failed to uninstall:")
+            for code, err in failures:
+                print(f"  • {code}: {err}")
+            return 1
+        return 0
+
+    # Single miner (existing path, unchanged)
+    print(f"Uninstalling {args.miner_code} miner...")
+    _uninstall_single(args.miner_code, args.system_wide, args.remove_data)
     return 0
 
 

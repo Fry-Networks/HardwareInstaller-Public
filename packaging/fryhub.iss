@@ -48,9 +48,15 @@ Source: "..\dist\frynetworks_updater_v{#AppVersion}.exe"; \
   DestDir: "{app}"; DestName: "frynetworks_updater.exe"; \
   Flags: ignoreversion skipifsourcedoesntexist
 
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
+  GroupDescription: "Additional shortcuts:"; Flags: unchecked
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; \
+  Tasks: desktopicon
 
 [Registry]
 Root: HKLM; Subkey: "Software\FryNetworks"; ValueType: string; \
@@ -66,6 +72,9 @@ Filename: "powershell.exe"; \
   StatusMsg: "Registering updater scheduled task..."
 
 [UninstallRun]
-; Remove the FryNetworksUpdater scheduled task on uninstall.
+; CLI-driven full uninstall of all miners + data
+Filename: "{app}\{#AppExeName}"; Parameters: "uninstall --all --remove-data -y"; \
+  Flags: runhidden waituntilterminated; RunOnceId: "FryNetworksUninstallAll"
+; Remove the FryNetworksUpdater scheduled task on uninstall (redundant safety net).
 Filename: "schtasks.exe"; Parameters: "/delete /tn FryNetworksUpdater /f"; \
   Flags: runhidden; RunOnceId: "DelUpdaterTask"
