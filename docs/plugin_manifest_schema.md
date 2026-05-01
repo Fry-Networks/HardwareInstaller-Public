@@ -55,7 +55,7 @@ backward compatibility with all existing consumers.
 
 ---
 
-## Phase 2 — CDN manifest (planned, not yet active)
+## Phase 2 — CDN manifest (loader active, CDN upload pending)
 
 ### Purpose
 
@@ -63,6 +63,12 @@ Phase 2 hosts the miner registry on Bunny CDN alongside the existing installer
 binary distribution. The manifest is fetched at installer startup (with a local
 fallback to the embedded `core/miner_registry.json`), enabling over-the-air miner
 type additions without rebuilding and redeploying the installer binary.
+
+### Status
+
+The loader (`core/registry_loader.py`) is active. Until the envelope JSON is
+uploaded to the CDN URL below, every launch falls through CDN (404) → cache
+(miss) → bundled JSON. This is correct, intended behavior.
 
 ### URL pattern
 
@@ -75,13 +81,56 @@ The manifest is wrapped in an integrity envelope:
 ```json
 {
   "manifest_version": "1.0.0",
-  "sha256": "<hex digest of the inner registry JSON>",
+  "sha256": "<hex digest of canonical JSON form of inner registry>",
   "registry": { ... }
 }
 ```
 
-The updater verifies `sha256` before applying the registry, matching the existing
+SHA-256 is computed over the **canonical** JSON form:
+`json.dumps(registry, sort_keys=True, separators=(",", ":"))`. This ensures
+deterministic hashes regardless of whitespace or key ordering in the source file.
+
+The loader verifies `sha256` before applying the registry, matching the existing
 pattern used by `tools/updater.py` for installer binary updates.
+
+### Loader architecture
+
+Two-phase loading separates import-time (local) from startup (network):
+
+1. **Import time** (`core/key_parser.py` → `registry_loader.load_local_registry()`):
+   reads disk cache → bundled JSON. No network. Never raises.
+2. **main() startup** (`installer_main.py` → `registry_loader.refresh_from_cdn()`):
+   CDN fetch with 3s timeout → verify SHA-256 → write disk cache → update
+   `MinerKeyParser.MINER_TYPES` in-place. On failure: no-op.
+
+Worst-case latency: 3s (broken DNS / partial connectivity before timeout).
+Confirmed-offline (adapter disabled) typically returns immediately.
+
+### Cache location
+
+```
+C:\ProgramData\FryNetworks\cache\miner_registry.json
+```
+
+- Created on first successful CDN fetch (`mkdir -p` equivalent)
+- Atomic write: `.json.tmp` + `os.replace` (matches `tools/updater.py:452-454`)
+- `PermissionError` caught — non-elevated runs do not crash on cache write failure
+
+### Fallback chain
+
+```
+CDN (3s timeout) → disk cache → bundled JSON
+```
+
+- **CDN**: freshest source, verified via SHA-256 envelope
+- **Disk cache**: persists across sessions, survives crashes and updates
+- **Bundled JSON**: built into PyInstaller onefile, always available
+
+### Envelope generation
+
+`build_cli.py:build_registry_envelope()` wraps `core/miner_registry.json` in the
+integrity envelope and writes `dist/miner_registry_envelope.json` for manual CDN
+upload.
 
 ### Additional fields planned for Phase 2
 
