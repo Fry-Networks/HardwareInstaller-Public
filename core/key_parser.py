@@ -7,26 +7,33 @@ This module handles:
 - Miner information lookup
 """
 
+import json
 import re
+from pathlib import Path
 from typing import Dict, Any, Optional
+
+_REGISTRY_PATH = Path(__file__).parent / "miner_registry.json"
+
+
+def _load_miner_types() -> Dict[str, Dict[str, Any]]:
+    """Load miner type definitions from the external registry (core/miner_registry.json)."""
+    with open(_REGISTRY_PATH, "r", encoding="utf-8") as f:
+        registry = json.load(f)
+    return {
+        entry["code"]: {
+            "name": entry["name"],
+            "group": entry["group"],
+            "exclusive": entry.get("exclusive"),
+        }
+        for entry in registry["miners"]
+    }
 
 
 class MinerKeyParser:
     """Automatic miner type detection from key format."""
-    
-    # Standard miner codes and their display names (updated naming from plan)
-    MINER_TYPES = {
-        "BM": {"name": "Bandwidth Miner", "group": "BM", "exclusive": None},
-        "IDM": {"name": "Indoor Decibel Miner", "group": "Decibel", "exclusive": "ODM"},
-        "ODM": {"name": "Outdoor Decibel Miner", "group": "Decibel", "exclusive": "IDM"},
-        "ISM": {"name": "Indoor Satellite Miner", "group": "Satellite", "exclusive": "OSM"},
-        "OSM": {"name": "Outdoor Satellite Miner", "group": "Satellite", "exclusive": "ISM"},
-        "RDN": {"name": "Compute Node", "group": "RDN", "exclusive": None},
-        "SVN": {"name": "Storage Validator Node", "group": "SVN", "exclusive": None},
-        "SDN": {"name": "Storage Decentralization Node", "group": "SDN", "exclusive": None},
-        "AEM": {"name": "AI Edge Miner", "group": "AEM", "exclusive": None},
-        "IRM": {"name": "Indoor Radiation Miner", "group": "Radiation", "exclusive": None}
-    }
+
+    # Loaded from core/miner_registry.json (was hardcoded dict prior to Phase 1 refactor)
+    MINER_TYPES = _load_miner_types()
     
     def __init__(self):
         """Initialize the parser."""
