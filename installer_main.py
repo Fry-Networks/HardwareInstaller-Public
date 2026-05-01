@@ -18,8 +18,15 @@ Usage:
 
 import sys
 import argparse
+import hashlib
+import json
 import os
 import logging
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -74,6 +81,299 @@ def _attempt_registry_refresh() -> None:
         _logger.debug("Registry refresh failed (non-critical): %s", e)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3b — Hub self-update check (launch-time, user-toggleable)
+# ---------------------------------------------------------------------------
+
+_HUB_MANIFEST_URL = (
+    "https://frynetworks-downloads.b-cdn.net/"
+    "frynetworks-installer/hub/latest/fryhub_version.json"
+)
+_HUB_MANIFEST_REQUIRED = ("manifest_version", "hub_version", "setup_url", "setup_sha256")
+
+
+def _hub_config_path() -> Path:
+    return (
+        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+        / "FryNetworks"
+        / "hub_config.json"
+    )
+
+
+def _read_hub_config() -> dict:
+    defaults = {
+        "auto_update_hub": False,
+        "last_update_check_at": None,
+        "last_seen_hub_version": None,
+    }
+    try:
+        text = _hub_config_path().read_text(encoding="utf-8")
+        data = json.loads(text)
+        if isinstance(data, dict):
+            defaults.update(data)
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError):
+        pass
+    return defaults
+
+
+def _write_hub_config(config: dict) -> None:
+    path = _hub_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except (PermissionError, OSError) as exc:
+        _logger.warning("Could not write hub_config.json: %s", exc)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_hub_manifest(timeout: int = 5) -> Optional[dict]:
+    """GET fryhub_version.json from Bunny CDN. Returns None on any failure."""
+    try:
+        req = urllib.request.Request(_HUB_MANIFEST_URL)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for field in _HUB_MANIFEST_REQUIRED:
+        if field not in data or not isinstance(data[field], str):
+            _logger.warning("Hub manifest missing or bad field: %s", field)
+            return None
+    mv = data["manifest_version"]
+    if not mv.startswith("1."):
+        _logger.warning("Unknown hub manifest major version: %s", mv)
+        return None
+    return data
+
+
+def _download_hub_setup(
+    url: str, dest: Path, expected_sha256: str, timeout: int = 120
+) -> Optional[Path]:
+    """Download + sha256-verify the Hub setup exe. Returns dest on success, None on failure."""
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Dedup: if file already exists with correct hash, skip re-download
+        if dest.exists():
+            if _sha256_file(dest).lower() == expected_sha256.lower():
+                return dest
+            dest.unlink()
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        actual = _sha256_file(dest)
+        if actual.lower() != expected_sha256.lower():
+            _logger.warning("Hub setup sha256 mismatch: expected=%s got=%s",
+                            expected_sha256, actual)
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return None
+        return dest
+    except Exception as exc:
+        _logger.debug("Hub setup download failed: %s", exc)
+        try:
+            if dest.exists():
+                dest.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _attempt_hub_update_check(args) -> None:
+    """Launch-time Hub self-update check.
+
+    Contract: returns None on EVERY failure mode.  Hub launch must NEVER fail
+    because this check failed.  Only calls sys.exit(0) on the success path
+    (Inno installer launched cleanly, current process should exit).
+    """
+    try:
+        _attempt_hub_update_check_inner(args)
+    except Exception as exc:
+        _logger.debug("Hub update check failed (%s); continuing", exc)
+
+
+def _attempt_hub_update_check_inner(args) -> None:
+    # 1. Flag guard
+    if getattr(args, "no_update_check", False):
+        return
+
+    # 2. Race guard — skip if scheduled-task updater is running
+    try:
+        tl = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq frynetworks_updater.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "frynetworks_updater.exe" in tl.stdout:
+            _logger.debug("Updater running, skipping launch-time hub check")
+            return
+    except Exception as exc:
+        _logger.debug("tasklist check failed (%s); proceeding with check", exc)
+
+    # 3. Read hub config
+    config = _read_hub_config()
+
+    # 4. Handle CLI config-persist flags
+    if getattr(args, "auto_update_hub", False):
+        config["auto_update_hub"] = True
+        _write_hub_config(config)
+    elif getattr(args, "no_auto_update_hub", False):
+        config["auto_update_hub"] = False
+        _write_hub_config(config)
+
+    # 5. Fetch manifest (404 on first-ever deploy = silent no-op)
+    manifest = _fetch_hub_manifest(timeout=5)
+    if manifest is None:
+        return
+
+    # 6. Compare versions
+    from version import WINDOWS_VERSION
+    cmp = _compare_versions(manifest["hub_version"], WINDOWS_VERSION)
+    if cmp <= 0:
+        return  # no update available
+
+    new_ver = manifest["hub_version"]
+    cur_ver = WINDOWS_VERSION
+    force_update = False
+
+    # 7. Check min_required (optional field)
+    min_req = manifest.get("min_required")
+    if min_req and isinstance(min_req, str):
+        if _compare_versions(cur_ver, min_req) < 0:
+            force_update = True
+
+    # Build download dest path
+    dest = (
+        Path(tempfile.gettempdir())
+        / "FryNetworks"
+        / "hub-update"
+        / f"FryHubSetup-{new_ver}.exe"
+    )
+
+    # 8. Auto-update path (silent, no modal)
+    if config.get("auto_update_hub") and not force_update:
+        setup = _download_hub_setup(
+            manifest["setup_url"], dest, manifest["setup_sha256"]
+        )
+        if setup is None:
+            return  # download failed — don't block Hub launch
+        _launch_hub_setup_and_exit(setup, config, manifest)
+        return  # _launch_hub_setup_and_exit calls sys.exit on success; if it returns, continue
+
+    # 9. Show modal (needs QApplication to already exist)
+    try:
+        from PySide6 import QtWidgets
+
+        dlg = QtWidgets.QMessageBox()
+        dlg.setWindowIcon(QtWidgets.QApplication.instance().windowIcon())
+
+        if force_update:
+            dlg.setWindowTitle("Fry Hub Update Required")
+            dlg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            dlg.setText("A required update must be installed before continuing.")
+            dlg.setInformativeText(
+                f"Current: v{cur_ver}\nRequired: v{new_ver}"
+            )
+            update_btn = dlg.addButton(
+                "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
+            exit_btn = dlg.addButton(
+                "Exit", QtWidgets.QMessageBox.ButtonRole.RejectRole
+            )
+            auto_cb = None
+        else:
+            dlg.setWindowTitle("Fry Hub Update Available")
+            dlg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+            dlg.setText("A new version of Fry Hub is available.")
+            dlg.setInformativeText(
+                f"Current: v{cur_ver}\nAvailable: v{new_ver}\n\n"
+                "Download and install now?"
+            )
+            update_btn = dlg.addButton(
+                "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
+            skip_btn = dlg.addButton(
+                "Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole
+            )
+            auto_cb = QtWidgets.QCheckBox(
+                "Always update automatically (skip this prompt)"
+            )
+            dlg.setCheckBox(auto_cb)
+
+        dlg.setDefaultButton(update_btn)
+        dlg.exec()
+        clicked = dlg.clickedButton()
+
+        if clicked == update_btn:
+            # Download + verify
+            setup = _download_hub_setup(
+                manifest["setup_url"], dest, manifest["setup_sha256"]
+            )
+            if setup is None:
+                return  # download failed — don't block Hub
+            # Persist auto-update checkbox
+            if auto_cb is not None and auto_cb.isChecked():
+                config["auto_update_hub"] = True
+            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+            config["last_seen_hub_version"] = new_ver
+            _write_hub_config(config)
+            _launch_hub_setup_and_exit(setup, config, manifest)
+            return
+        else:
+            # Skip or Exit
+            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+            config["last_seen_hub_version"] = new_ver
+            _write_hub_config(config)
+            if force_update:
+                sys.exit(0)  # Required update refused — exit before event loop
+            return  # Skip — Hub launches normally
+
+    except Exception as exc:
+        _logger.warning("Hub update modal failed (%s); skipping update", exc)
+        return
+
+
+def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict) -> None:
+    """Launch the Inno Setup installer as a detached process and exit."""
+    inno_log = (
+        Path(tempfile.gettempdir())
+        / "FryNetworks"
+        / "hub-update"
+        / "fryhub-update-install.log"
+    )
+    try:
+        subprocess.Popen(
+            [
+                str(setup_exe),
+                "/SILENT", "/SP-", "/SUPPRESSMSGBOXES",
+                "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/NORESTART",
+                f"/LOG={inno_log}",
+            ],
+            creationflags=subprocess.DETACHED_PROCESS,
+        )
+        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+        config["last_seen_hub_version"] = manifest["hub_version"]
+        _write_hub_config(config)
+        sys.exit(0)
+    except Exception as exc:
+        _logger.error("Failed to launch FryHubSetup: %s", exc)
+        # Do NOT sys.exit — let Hub launch normally
+
+
 def main():
     """Main entry point for the installer."""
     # Load environment variables
@@ -103,7 +403,15 @@ Examples:
                        help='Enable verbose output')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress dialogs; used by updater for silent upgrade')
-    
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip launch-time Hub update check')
+
+    auto_grp = parser.add_mutually_exclusive_group()
+    auto_grp.add_argument('--auto-update-hub', action='store_true',
+                         help='Enable automatic Hub updates (persists to hub_config.json)')
+    auto_grp.add_argument('--no-auto-update-hub', action='store_true',
+                         help='Disable automatic Hub updates (persists to hub_config.json)')
+
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
@@ -464,6 +772,9 @@ def launch_gui(args):
         
         if icon_path.exists():
             app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
+        # Phase 3b: launch-time Hub self-update check (after QApplication, before window)
+        _attempt_hub_update_check(args)
 
         _slog.info("About to create FryNetworksInstallerWindow")
         window = FryNetworksInstallerWindow()

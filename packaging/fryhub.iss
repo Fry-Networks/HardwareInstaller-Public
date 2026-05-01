@@ -32,6 +32,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ShowLanguageDialog=no
+CloseApplications=force
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
