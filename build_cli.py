@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import hashlib
+import json
 import subprocess
 import sys
 import os
@@ -139,6 +140,35 @@ def emit_sha256(file_path: Path) -> Optional[Path]:
     print(f"[SHA256] {digest}  {file_path.name}")
     print(f"[SHA256] Written to {sha_path}")
     return sha_path
+
+
+def build_registry_envelope(registry_path: Path = None) -> Path:
+    """Wrap core/miner_registry.json in an integrity envelope for CDN upload.
+
+    The envelope contains:
+    - ``manifest_version``: always ``"1.0.0"``
+    - ``sha256``: hex digest of the canonical JSON form of the registry
+    - ``registry``: the full registry object
+
+    Output: ``dist/miner_registry_envelope.json``
+    """
+    src = registry_path or Path("core/miner_registry.json")
+    raw = src.read_text(encoding="utf-8")
+    registry = json.loads(raw)
+    # Canonical form for deterministic hash regardless of JSON formatting
+    canonical = json.dumps(registry, sort_keys=True, separators=(",", ":"))
+    sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    envelope = {
+        "manifest_version": "1.0.0",
+        "sha256": sha,
+        "registry": registry,
+    }
+    out = Path("dist") / "miner_registry_envelope.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+    print(f"[ENVELOPE] SHA-256: {sha}")
+    print(f"[ENVELOPE] Written to {out}")
+    return out
 
 
 # --- MSI helpers (WiX) ---

@@ -51,11 +51,37 @@ except ImportError as e:
     print(f"Warning: Failed to import some modules: {e}")
     # Continue anyway - we'll try to import them again later
 
+def _attempt_registry_refresh() -> None:
+    """Foreground CDN fetch (3s timeout). Updates MinerKeyParser.MINER_TYPES if fresh data.
+
+    Worst-case 3s latency on broken DNS / partial connectivity.
+    Confirmed-offline (adapter disabled) returns immediately.
+    On failure: no-op — import-time load already populated MINER_TYPES.
+    """
+    try:
+        from core.registry_loader import refresh_from_cdn
+        registry = refresh_from_cdn(timeout=3)
+        if registry is None:
+            return
+        new_types = {
+            entry["code"]: {"name": entry["name"], "group": entry["group"],
+                            "exclusive": entry.get("exclusive")}
+            for entry in registry.get("miners", [])
+        }
+        MinerKeyParser.MINER_TYPES = new_types
+        _logger.info("Registry refreshed from CDN: %d miner types", len(new_types))
+    except Exception as e:
+        _logger.debug("Registry refresh failed (non-critical): %s", e)
+
+
 def main():
     """Main entry point for the installer."""
     # Load environment variables
     load_env()
-    
+
+    # Phase 2: attempt CDN registry refresh (3s timeout, fallback to local)
+    _attempt_registry_refresh()
+
     parser = argparse.ArgumentParser(
         description="Fry Hub",
         formatter_class=argparse.RawDescriptionHelpFormatter,

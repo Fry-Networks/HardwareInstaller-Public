@@ -7,25 +7,21 @@ This module handles:
 - Miner information lookup
 """
 
-import json
 import re
-from pathlib import Path
 from typing import Dict, Any, Optional
-
-_REGISTRY_PATH = Path(__file__).parent / "miner_registry.json"
 
 
 def _load_miner_types() -> Dict[str, Dict[str, Any]]:
-    """Load miner type definitions from the external registry (core/miner_registry.json)."""
-    with open(_REGISTRY_PATH, "r", encoding="utf-8") as f:
-        registry = json.load(f)
+    """Load miner types from local registry (cache or bundled). No network."""
+    from core.registry_loader import load_local_registry
+    registry = load_local_registry()
     return {
         entry["code"]: {
             "name": entry["name"],
             "group": entry["group"],
             "exclusive": entry.get("exclusive"),
         }
-        for entry in registry["miners"]
+        for entry in registry.get("miners", [])
     }
 
 
