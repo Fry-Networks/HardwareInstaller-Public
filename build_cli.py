@@ -278,6 +278,49 @@ def build_msi(
         return False
 
 
+def build_inno(version: str) -> Path:
+    """Compile packaging/fryhub.iss into dist/FryHubSetup-<version>.exe via ISCC."""
+    iscc = Path(os.path.expandvars(
+        r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+    ))
+    if not iscc.exists():
+        # Fallback: system-wide install
+        iscc = Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe")
+    if not iscc.exists():
+        raise FileNotFoundError(
+            f"ISCC.exe not found. Install Inno Setup 6 from "
+            "https://jrsoftware.org/isdl.php (or via `winget install --id JRSoftware.InnoSetup -e`)."
+        )
+    iss = Path("packaging/fryhub.iss")
+    if not iss.exists():
+        raise FileNotFoundError(f"Inno script missing: {iss}")
+    out_dir = Path("dist")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(iscc),
+        f"/DAppVersion={version}",
+        "/Q",                  # quiet — only errors print
+        str(iss),
+    ]
+    print(f"[inno] {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["MSYS_NO_PATHCONV"] = "1"   # prevent MSYS2 from mangling /D and /Q flags
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ISCC compile failed (exit {result.returncode}). See stderr above."
+        )
+    out = out_dir / f"FryHubSetup-{version}.exe"
+    if not out.exists():
+        raise RuntimeError(f"Inno output missing after compile: {out}")
+    print(f"[inno] OK: {out}  ({out.stat().st_size:,} bytes)")
+    return out
+
+
 def show_version_info():
     """Display current version information."""
     win_version = get_current_version("windows")
@@ -363,7 +406,12 @@ Examples:
         action="store_true",
         help="Do not write a .sha256 checksum next to the built MSI"
     )
-    
+    parser.add_argument(
+        "--inno",
+        action="store_true",
+        help="On Windows, also build an Inno Setup installer after building the EXE"
+    )
+
     args = parser.parse_args()
     
     # Show version and exit
@@ -433,6 +481,7 @@ Examples:
                 continue
             for artifact in sorted(list(d.glob("*.msi")) + list(d.glob("*.exe"))):
                 emit_sha256(artifact)
+        build_failures = []
         if args.msi and (sys.platform.startswith("win") or os.name == "nt"):
             exe_path = Path(args.msi_exe) if args.msi_exe else None
             out_dir = Path(args.msi_out_dir) if args.msi_out_dir else None
@@ -443,7 +492,17 @@ Examples:
                 output_dir=out_dir,
                 emit_checksum=not args.msi_no_checksum,
             )
-            return 0 if msi_ok else 1
+            if not msi_ok:
+                build_failures.append("MSI")
+        if args.inno and (sys.platform.startswith("win") or os.name == "nt"):
+            try:
+                build_inno(target_version)
+            except Exception as e:
+                print(f"Inno build failed: {e}")
+                build_failures.append("Inno")
+        if build_failures:
+            print(f"Post-build packaging failed: {', '.join(build_failures)}")
+            return 1
         return 0
     else:
         print(f"\n? Build failed for version {target_version}")
