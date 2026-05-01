@@ -3909,6 +3909,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             task_autostart_action.setCheckable(True)
             task_autostart_action.setChecked(self._is_installer_task_autostart_enabled())
         menu.addSeparator()
+        autoupdate_action = menu.addAction("Auto-update Fry Hub")
+        autoupdate_action.setCheckable(True)
+        autoupdate_action.setChecked(self._is_autoupdate_enabled())
+        autoupdate_action.triggered.connect(lambda checked: self._toggle_autoupdate(checked))
+        self._tray_autoupdate_action = autoupdate_action  # keep ref for dialog sync
+
+        settings_action = menu.addAction("Fry Hub Settings...")
+        settings_action.triggered.connect(self._show_hub_settings_dialog)
+
+        menu.addSeparator()
         update_action = menu.addAction("Check for Updates")
         exit_action = menu.addAction("Exit Fry Hub")
         show_action.triggered.connect(self._restore_from_tray)
@@ -3922,6 +3932,86 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         tray.show()
         self._slog.info("_setup_tray_icon(): tray.show() called — tray icon now visible")
         self._tray_icon = tray
+
+    def _is_autoupdate_enabled(self) -> bool:
+        try:
+            from core.hub_config import read_hub_config
+            return bool(read_hub_config().get("auto_update_hub", False))
+        except Exception:
+            return False
+
+    def _toggle_autoupdate(self, checked: bool) -> None:
+        try:
+            from core.hub_config import read_hub_config, write_hub_config
+            cfg = read_hub_config()
+            cfg["auto_update_hub"] = checked
+            write_hub_config(cfg)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error",
+                f"Could not save auto-update setting:\n{exc}"
+            )
+            # Revert tray toggle to previous state
+            if hasattr(self, '_tray_autoupdate_action'):
+                self._tray_autoupdate_action.setChecked(not checked)
+
+    def _show_hub_settings_dialog(self) -> None:
+        # Singleton: if dialog already open, raise it
+        if hasattr(self, '_hub_settings_dialog') and self._hub_settings_dialog is not None:
+            self._hub_settings_dialog.raise_()
+            self._hub_settings_dialog.activateWindow()
+            return
+
+        try:
+            from core.hub_config import read_hub_config, write_hub_config
+        except ImportError as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error", f"Could not load settings module:\n{exc}")
+            return
+
+        cfg = read_hub_config()
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Fry Hub Settings")
+        dlg.setMinimumWidth(380)
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        # Auto-update checkbox
+        auto_cb = QtWidgets.QCheckBox("Automatically update Fry Hub when a new version is available")
+        auto_cb.setChecked(bool(cfg.get("auto_update_hub", False)))
+        layout.addWidget(auto_cb)
+
+        layout.addStretch()
+
+        # OK / Cancel buttons
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        self._hub_settings_dialog = dlg
+        try:
+            if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_auto = auto_cb.isChecked()
+                old_auto = bool(cfg.get("auto_update_hub", False))
+                # Only write if value actually changed
+                if new_auto != old_auto:
+                    cfg["auto_update_hub"] = new_auto
+                    try:
+                        write_hub_config(cfg)
+                    except Exception as exc:
+                        QtWidgets.QMessageBox.warning(
+                            self, "Settings Error",
+                            f"Could not save settings:\n{exc}"
+                        )
+                # Sync tray toggle regardless (reflects current persisted state)
+                if hasattr(self, '_tray_autoupdate_action'):
+                    self._tray_autoupdate_action.setChecked(new_auto)
+        finally:
+            self._hub_settings_dialog = None
 
     def _check_for_updates_clicked(self) -> None:
         """Shell out to the installed updater with stage-text modal progress."""

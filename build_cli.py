@@ -280,16 +280,22 @@ def build_msi(
 
 def build_inno(version: str) -> Path:
     """Compile packaging/fryhub.iss into dist/FryHubSetup-<version>.exe via ISCC."""
-    iscc = Path(os.path.expandvars(
-        r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
-    ))
-    if not iscc.exists():
-        # Fallback: system-wide install
-        iscc = Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe")
-    if not iscc.exists():
+    candidates = [
+        Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe")),
+        Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+        Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
+    ]
+    iscc = None
+    for p in candidates:
+        if p.exists():
+            iscc = p
+            break
+    if iscc is None:
         raise FileNotFoundError(
-            f"ISCC.exe not found. Install Inno Setup 6 from "
-            "https://jrsoftware.org/isdl.php (or via `winget install --id JRSoftware.InnoSetup -e`)."
+            "ISCC.exe not found at any of:\n"
+            + "\n".join(f"  • {p}" for p in candidates)
+            + "\nInstall Inno Setup 6 from https://jrsoftware.org/isdl.php "
+            "(or via `winget install --id JRSoftware.InnoSetup -e`)."
         )
     iss = Path("packaging/fryhub.iss")
     if not iss.exists():
