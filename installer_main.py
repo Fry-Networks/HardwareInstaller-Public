@@ -108,6 +108,16 @@ def _fetch_hub_manifest(timeout: int = 5) -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
+        import traceback as _diag2_tb
+        import os as _diag2_os
+        try:
+            _diag2_os.makedirs(r'C:\temp', exist_ok=True)
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _diag2_f:
+                _diag2_f.write('=== _fetch_hub_manifest swallow @ ' + __import__('datetime').datetime.now().isoformat() + ' ===\n')
+                _diag2_f.write(_diag2_tb.format_exc())
+                _diag2_f.write('\n')
+        except Exception:
+            pass
         return None
     if not isinstance(data, dict):
         return None
@@ -170,6 +180,17 @@ def _attempt_hub_update_check(args) -> None:
     try:
         _attempt_hub_update_check_inner(args)
     except Exception as exc:
+        # DIAG2: capture swallowed exception to file (GUI subsystem hides stdout)
+        import traceback as _diag2_tb
+        import os as _diag2_os
+        try:
+            _diag2_os.makedirs(r'C:\temp', exist_ok=True)
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _diag2_f:
+                _diag2_f.write('=== _attempt_hub_update_check swallow @ ' + __import__('datetime').datetime.now().isoformat() + ' ===\n')
+                _diag2_f.write(_diag2_tb.format_exc())
+                _diag2_f.write('\n')
+        except Exception:
+            pass
         _logger.debug("Hub update check failed (%s); continuing", exc)
 
 
@@ -314,29 +335,102 @@ def _attempt_hub_update_check_inner(args) -> None:
 
 
 def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict) -> None:
-    """Launch the Inno Setup installer as a detached process and exit."""
+    """Launch Inno Setup via a PowerShell wrapper that waits for Hub to exit.
+
+    Phase 3e Part 3 fix (a): PyInstaller's bootloader parent holds an OS-loader
+    SEC_IMAGE mapping on frynetworks_installer.exe during _MEI cleanup after the
+    Python child exits.  If Inno writes during that window the write fails with
+    ERROR_ACCESS_DENIED.  Spawning Inno through a PowerShell wrapper that polls
+    for the Hub PID to disappear (+ 3 s grace) eliminates the race.
+    """
+    import textwrap
+
     inno_log = (
         Path(tempfile.gettempdir())
         / "FryNetworks"
         / "hub-update"
         / "fryhub-update-install.log"
     )
+    wrapper_dir = inno_log.parent
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+    wrapper_path = wrapper_dir / "fryhub-launch-update.ps1"
+
+    ps_script = textwrap.dedent("""\
+    param(
+        [int]$HubPid,
+        [string]$InnoExe,
+        [string]$InnoLog
+    )
+
+    # Phase 3e Part 3 diagnostic instrumentation (TEMPORARY)
+    $wrapperLog = "$env:TEMP\FryNetworks\hub-update\wrapper-diag-$(Get-Date -Format 'yyyyMMddHHmmss').log"
+    function W($msg) { "$([DateTime]::UtcNow.ToString('o')) $msg" | Out-File -FilePath $wrapperLog -Append -Encoding UTF8 }
+    W "WRAPPER_START HubPid=$HubPid InnoExe=$InnoExe InnoLog=$InnoLog"
+    W "PSCommandPath=$PSCommandPath"
+    W "Identity: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+    W "Elevated: $(([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))"
+    W "InnoExe Test-Path: $(Test-Path $InnoExe)"
+    if (Test-Path $InnoExe) { W "InnoExe size: $((Get-Item $InnoExe).Length)" }
+    W "InnoLog parent Test-Path: $(Test-Path (Split-Path $InnoLog -Parent))"
+    $preSha = (Get-FileHash -Algorithm SHA256 -Path 'C:\Program Files\FryNetworks\\frynetworks_installer.exe' -ErrorAction SilentlyContinue).Hash
+    W "Pre-Inno target SHA: $preSha"
+
+    $elapsed = 0
+    while ((Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -and ($elapsed -lt 60)) {
+        Start-Sleep -Seconds 1
+        $elapsed++
+    }
+    W "Post-poll: HubPid alive=$((Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -ne $null) elapsed=$elapsed"
+
+    Start-Sleep -Seconds 3
+    W "Pre-Inno launch"
+
+    try {
+        $innoProc = Start-Process -FilePath $InnoExe -ArgumentList @('/SILENT','/SP-','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS','/NORESTART',('/LOG=' + $InnoLog)) -WindowStyle Hidden -PassThru -Wait
+        W "Inno exit: code=$($innoProc.ExitCode) pid=$($innoProc.Id) hasExited=$($innoProc.HasExited)"
+    } catch {
+        W "Inno launch EXCEPTION: $($_ | Out-String)"
+    }
+
+    $postSha = (Get-FileHash -Algorithm SHA256 -Path 'C:\Program Files\FryNetworks\\frynetworks_installer.exe' -ErrorAction SilentlyContinue).Hash
+    W "Post-Inno target SHA: $postSha"
+    W "WRAPPER_END"
+
+    try { Move-Item -LiteralPath $PSCommandPath -Destination "$PSCommandPath.completed-$(Get-Date -Format 'yyyyMMddHHmmss')" -Force -ErrorAction SilentlyContinue } catch {}
+""")
+    wrapper_path.write_text(ps_script, encoding="utf-8")
+
     try:
-        subprocess.Popen(
-            [
-                str(setup_exe),
-                "/SILENT", "/SP-", "/SUPPRESSMSGBOXES",
-                "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS", "/NORESTART",
-                f"/LOG={inno_log}",
-            ],
-            creationflags=subprocess.DETACHED_PROCESS,
-        )
         config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
         config["last_seen_hub_version"] = manifest["hub_version"]
         write_hub_config(config)
+
+        # Phase 3e Part 3 fix (b): explicit null handles for PowerShell child.
+        # DETACHED_PROCESS allocates no console; powershell.exe (console app) needs
+        # valid stdin/stdout/stderr or its startup fails silently before wrapper code
+        # runs. CREATE_NEW_PROCESS_GROUP isolates the child from parent signal group.
+        # Capturing p.pid lets us log it for next-run forensics.
+        p = subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden",
+                "-File", str(wrapper_path),
+                "-HubPid", str(os.getpid()),
+                "-InnoExe", str(setup_exe),
+                "-InnoLog", str(inno_log),
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        _logger.info("Hub-update wrapper Popen returned PID=%d", p.pid)
         sys.exit(0)
     except Exception as exc:
-        _logger.error("Failed to launch FryHubSetup: %s", exc)
+        _logger.error("Failed to launch update wrapper: %s", exc)
         # Do NOT sys.exit — let Hub launch normally
 
 
@@ -344,6 +438,17 @@ def main():
     """Main entry point for the installer."""
     # Load environment variables
     load_env()
+
+    # Phase 3e Part 3 fix (c): named mutex for Inno AppMutex interlock.
+    # Held for process lifetime; released automatically on process exit.
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        _CreateMutexW = ctypes.windll.kernel32.CreateMutexW
+        _CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        _CreateMutexW.restype = wintypes.HANDLE
+        global _HUB_INSTANCE_MUTEX  # noqa: PLW0603 — intentional module-level ref
+        _HUB_INSTANCE_MUTEX = _CreateMutexW(None, False, "FryNetworksHubInstanceMutex_v1")
 
     # Phase 2: attempt CDN registry refresh (3s timeout, fallback to local)
     _attempt_registry_refresh()
@@ -648,7 +753,7 @@ def launch_gui(args):
     try:
         import pyi_splash
         pyi_splash.update_text('Initializing...')
-    except ImportError:
+    except Exception:
         pass
 
     try:
@@ -724,7 +829,7 @@ def launch_gui(args):
         try:
             import pyi_splash
             pyi_splash.close()
-        except ImportError:
+        except Exception:
             pass  # not a frozen PyInstaller bundle (dev mode)
 
         app.setApplicationName("Fry Hub")
@@ -794,7 +899,7 @@ def launch_gui(args):
             import pyi_splash
             pyi_splash.update_text('Starting installer...')
             pyi_splash.close()
-        except ImportError:
+        except Exception:
             pass  # not a frozen PyInstaller bundle (dev mode)
         _slog.info(f"window.show() returned — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
