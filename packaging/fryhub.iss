@@ -32,8 +32,9 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ShowLanguageDialog=no
-CloseApplications=force
-RestartApplications=yes
+CloseApplications=yes
+RestartApplications=no
+AppMutex=FryNetworksHubInstanceMutex_v1
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
