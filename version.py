@@ -1,4 +1,4 @@
-"""
+﻿"""
 FryNetworks Installer Version Management
 
 This module provides version information for the installer.
@@ -8,7 +8,7 @@ Version follows semantic versioning: MAJOR.MINOR.PATCH
 import sys
 from typing import Optional, Tuple
 
-WINDOWS_VERSION = "4.0.19"
+WINDOWS_VERSION = "4.0.21.3"
 LINUX_VERSION = "1.1.4"
 __build_date__ = None  # Set during build process
 

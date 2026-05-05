@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 FryNetworks Miner Installer - Main Entry Point
 
@@ -735,6 +735,23 @@ def _self_downgrade_check():
     sys.exit(2)
 
 
+def _safe_pyi_splash(action):
+    """Call action(pyi_splash) if pyi_splash is imported AND its IPC channel is initialized.
+    Otherwise silently return. This avoids RuntimeError spam when the bootloader splash
+    is not actually attached (e.g., onefile + uac_admin issues, or non-frozen runs).
+    """
+    try:
+        import pyi_splash
+    except ImportError:
+        return
+    if not getattr(pyi_splash, '_initialized', False):
+        return
+    try:
+        action(pyi_splash)
+    except Exception:
+        pass
+
+
 def launch_gui(args):
     """Launch the graphical installer interface."""
     # Hide console window on Windows for GUI mode to prevent duplicate icons
@@ -750,11 +767,7 @@ def launch_gui(args):
     _slog.info("=" * 80)
     _slog.info("NEW RUN — launch_gui() entered")
     _slog.info(f"sys.argv={sys.argv}, frozen={getattr(sys, 'frozen', False)}")
-    try:
-        import pyi_splash
-        pyi_splash.update_text('Initializing...')
-    except Exception:
-        pass
+    _safe_pyi_splash(lambda s: s.update_text('Initializing...'))
 
     try:
         # Check for GUI dependencies
@@ -826,11 +839,31 @@ def launch_gui(args):
         # Without this, QMessageBox.exec() at L284 (update prompt) and L612
         # (downgrade prompt) hang indefinitely because the bootloader splash
         # overlay sits above all Qt windows.
+        _safe_pyi_splash(lambda s: s.close())
+
+        # Bridge: show Qt splash to cover gap between pyi_splash close and window.show()
+        _qt_splash = None
         try:
-            import pyi_splash
-            pyi_splash.close()
+            if getattr(sys, 'frozen', False):
+                _splash_img = Path(sys._MEIPASS) / "resources" / "frynetworks_splash.png"
+            else:
+                _splash_img = Path(__file__).parent / "resources" / "frynetworks_splash.png"
+            if _splash_img.exists():
+                _qt_splash = QtWidgets.QSplashScreen(
+                    QtGui.QPixmap(str(_splash_img)),
+                    QtCore.Qt.WindowType.WindowStaysOnTopHint
+                )
+                _qt_splash.show()
+                app.processEvents()
+                try:
+                    import os as _spl_os
+                    _spl_os.makedirs(r'C:\temp', exist_ok=True)
+                    with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                        _sf.write(f"=== Qt splash OPEN @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+                except Exception:
+                    pass
         except Exception:
-            pass  # not a frozen PyInstaller bundle (dev mode)
+            pass  # Non-critical
 
         app.setApplicationName("Fry Hub")
         app.setApplicationVersion("1.0.0")
@@ -852,15 +885,14 @@ def launch_gui(args):
         # Set application icon - check if running from PyInstaller bundle
         if getattr(sys, 'frozen', False):
             base_path = Path(sys._MEIPASS)  # type: ignore
-            icon_path = base_path / "resources" / "frynetworks_logo.ico"
+            icon_path = base_path / "resources" / "fryhub.ico"
         else:
-            icon_path = Path(__file__).parent / "resources" / "frynetworks_logo.ico"
+            icon_path = Path(__file__).parent / "resources" / "fryhub.ico"
         
         if icon_path.exists():
             app.setWindowIcon(QtGui.QIcon(str(icon_path)))
 
-        # Phase 3b: launch-time Hub self-update check (after QApplication, before window)
-        _attempt_hub_update_check(args)
+        # Phase 3b: Hub self-update check deferred to post-show (was blocking 0-5s network I/O)
 
         _slog.info("About to create FryNetworksInstallerWindow")
         window = FryNetworksInstallerWindow()
@@ -894,13 +926,11 @@ def launch_gui(args):
 
         _slog.info("Calling window.show()")
         window.show()
-        # Dismiss PyInstaller splash now that main window is visible
         try:
-            import pyi_splash
-            pyi_splash.update_text('Starting installer...')
-            pyi_splash.close()
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                _sf.write(f"=== window.show() @ {__import__('datetime').datetime.now().isoformat()} ===\n")
         except Exception:
-            pass  # not a frozen PyInstaller bundle (dev mode)
+            pass
         _slog.info(f"window.show() returned — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"windowHandle={'exists' if window.windowHandle() else 'None'}")
@@ -921,10 +951,78 @@ def launch_gui(args):
             except Exception as e:
                 _slog.warning(f"SetForegroundWindow failed: {e}")
 
+        try:
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                _sf.write(f"=== window activated @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+        except Exception:
+            pass
         _slog.info(f"Post-activation — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"pos=({window.x()},{window.y()}), "
                     f"size=({window.width()}x{window.height()})")
+
+        # Phase 3b: Hub self-update check — deferred to post-show so window is visible first
+        QtCore.QTimer.singleShot(200, lambda: _attempt_hub_update_check(args))
+
+        # Close Qt splash synchronously now that the window is visible + activated.
+        # Previous design used QTimer.singleShot(150, ...) but the timer fires on event-loop
+        # entry, which can be 10-30s later if deferred init blocks app.exec(). Sync close
+        # here ensures the splash dismisses as soon as the window is on screen.
+        if _qt_splash is not None:
+            try:
+                _qt_splash.finish(window)
+                # Single processEvents() call to ensure paint completes before we continue
+                app.processEvents()
+                _slog.info("app.processEvents() after splash finish — returned")
+                try:
+                    _qt_splash.close()
+                except Exception:
+                    pass
+                try:
+                    _qt_splash.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                        _sf.write(f"=== Qt splash CLOSE @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+                except Exception:
+                    pass
+            finally:
+                _qt_splash = None
+        _slog.info("Splash cleanup complete")
+
+        # Cleanup on app exit: release single-instance mutex, close local server, hide tray.
+        # Without this, the mutex persists if the QApplication stays alive via tray, and
+        # subsequent Hub launches see a stale mutex.
+        def _on_about_to_quit():
+            global _HUB_INSTANCE_MUTEX
+            try:
+                if _HUB_INSTANCE_MUTEX:
+                    import ctypes
+                    ctypes.windll.kernel32.CloseHandle(_HUB_INSTANCE_MUTEX)
+                    _HUB_INSTANCE_MUTEX = None
+            except Exception:
+                pass
+            try:
+                local_server.close()
+            except Exception:
+                pass
+            try:
+                # Hide tray if window has one. Window may already be destroyed.
+                tray = getattr(window, 'tray_icon', None) or getattr(window, '_tray_icon', None)
+                if tray is not None:
+                    tray.hide()
+            except Exception:
+                pass
+            try:
+                with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                    _sf.write(f"=== aboutToQuit cleanup @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+            except Exception:
+                pass
+        _slog.info("_on_about_to_quit handler defined")
+        app.aboutToQuit.connect(_on_about_to_quit)
+        _slog.info("aboutToQuit handler connected")
+
         _slog.info("Entering app.exec() event loop")
 
         return app.exec()

@@ -1,4 +1,4 @@
-param([string]$Version = "")
+﻿param([string]$Version = "")
 $ErrorActionPreference = "Stop"
 
 # 1Password references for retrieving secrets at build time
@@ -199,7 +199,7 @@ try {
         --onefile `
         --noconsole `
         --paths "." `
-        --icon "resources\frynetworks_logo.ico" `
+        --icon "resources\fryhub.ico" `
         --name frynetworks_updater `
         tools\updater.py
     if (-not (Test-Path "dist\frynetworks_updater.exe")) { throw "updater.exe not found after build" }
@@ -232,10 +232,12 @@ try {
         --hidden-import "core.naming" `
         --hidden-import "core.key_parser" `
         --collect-submodules "core" `
-        --icon "resources\frynetworks_logo.ico" `
+        --icon "resources\fryhub.ico" `
+        --version-file "resources\version_info.txt" `
         --splash "resources\frynetworks_splash.png" `
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
+        --add-data "resources\frynetworks_splash.png;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
         --add-data "resources\embedded;resources\embedded" `
         --add-data "SDK;SDK" `

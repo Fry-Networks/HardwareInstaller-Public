@@ -1,4 +1,4 @@
-"""
+﻿"""
 FryNetworks Installer GUI Window
 
 Main graphical interface for the FryNetworks miner installer with:
@@ -219,9 +219,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Load FryNetworks icon early so tray icon setup can use it
         if getattr(sys, 'frozen', False):
             base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
-            icon_path = base_path / "resources" / "frynetworks_logo.ico"
+            icon_path = base_path / "resources" / "fryhub.ico"
         else:
-            icon_path = Path(__file__).parent.parent / "resources" / "frynetworks_logo.ico"
+            icon_path = Path(__file__).parent.parent / "resources" / "fryhub.ico"
 
         if icon_path.exists():
             self._app_icon = QtGui.QIcon(str(icon_path))
@@ -285,14 +285,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.resize(900, 800)
         self._slog.info("FryNetworksInstallerWindow.__init__() finished")
 
-        # Best-effort cleanup of Orbit/WebAgent residue from pre-v4.0.13 installs
-        try:
-            self._cleanup_aem_companions()
-        except Exception as e:
-            try:
-                self._slog.warning(f"legacy companion cleanup failed (best-effort): {e}")
-            except Exception:
-                pass
+        # Best-effort cleanup of Orbit/WebAgent residue — deferred to post-show
+        QtCore.QTimer.singleShot(500, lambda: self._cleanup_aem_companions() if hasattr(self, '_cleanup_aem_companions') else None)
 
     def _debug_log(self, message: str) -> None:
         """Best-effort append-only debug logger for installer events."""
@@ -499,11 +493,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        # Initialize tray icon/menu
-        try:
-            self._setup_tray_icon()
-        except Exception:
-            pass
+        # Tray icon deferred to post-show (was ~0.5s in setup_ui critical path)
+        QtCore.QTimer.singleShot(250, self._setup_tray_icon)
 
         # Create wizard for installation process
         self.wizard = QtWidgets.QWizard()        
@@ -793,9 +784,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     )
                     table_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
                     table_label.setWordWrap(True)
-                    tc_layout.addWidget(table_label, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+                    table_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+                    tc_layout.addWidget(table_label)
                     self._welcome_table_label = table_label
-                    main_layout.addWidget(table_container)
+                    main_layout.addWidget(table_container, 1)
                 except Exception:
                     try:
                         fallback_container = QtWidgets.QWidget()
@@ -1680,9 +1672,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 table_label = QtWidgets.QLabel(welcome_html)
                 table_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
                 table_label.setWordWrap(True)
-                tc_layout.addWidget(table_label, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+                table_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+                tc_layout.addWidget(table_label)
 
-                main_layout.addWidget(table_container)
+                main_layout.addWidget(table_container, 1)
             except Exception:
                 pass
 
@@ -2007,8 +2000,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 gui_version = install.get('config', {}).get('gui_version', '').strip()
                 poc_version = install.get('config', {}).get('poc_version', '').strip()
                 
-                # Only include installations that have a valid miner key and both versions
-                if miner_key and gui_version and poc_version and gui_version != 'Unknown' and poc_version != 'Unknown':
+                # Include installations that have at least one identifier (key or version)
+                if (miner_key or gui_version or poc_version) and gui_version != 'Unknown' and poc_version != 'Unknown':
                     valid_installations.append(install)
             
             installations = valid_installations
@@ -4085,10 +4078,20 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         f"Fry Hub (v{WINDOWS_VERSION})."
                     )
             else:
-                QtWidgets.QMessageBox.warning(
-                    self, "Check for Updates",
+                _EXIT_MSGS = {
+                    2: ("Could not reach update server (Bunny CDN "
+                        "connectivity issue). Check your internet "
+                        "connection and try again."),
+                    3: "Update manifest is invalid. See the updater log for details.",
+                    7: "Could not determine installed version.",
+                }
+                detail = _EXIT_MSGS.get(
+                    exit_code,
                     f"Updater exited with code {exit_code}.\n\n"
-                    "See the updater log for details."
+                    "See the updater log for details.",
+                )
+                QtWidgets.QMessageBox.warning(
+                    self, "Check for Updates", detail
                 )
                 try:
                     self._slog.warning(
@@ -4168,32 +4171,23 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        """Intercept close events to minimize to tray unless explicitly exiting.
-        
-        Only minimize to tray if the user has progressed past the welcome screen
-        (clicked "Get Started"). If they close from the welcome screen, fully exit.
+        """Handle close events by exiting the application.
+
+        Bug #3 fix (4.0.21.2): tray-hide-on-X behavior removed. X-close always exits,
+        ensuring the single-instance mutex is released via aboutToQuit cleanup.
         """
         try:
-            # Only minimize to tray if we've moved past the welcome screen
             welcome_closed = getattr(self, '_welcome_closed_by_user', False)
-            if not self._allow_close and self._tray_icon and self._tray_icon.isVisible() and welcome_closed:
-                event.ignore()
-                self.hide()
-                self._reset_on_restore = True
-                if not self._tray_message_shown:
-                    try:
-                        self._tray_icon.showMessage(
-                            "Fry Hub",
-                            "Install and update Fry miners and nodes. Right-click the tray icon to exit.",
-                            QtWidgets.QSystemTrayIcon.MessageIcon.Information,
-                            4000,
-                        )
-                        self._tray_message_shown = True
-                    except Exception:
-                        pass
-                return
+            _tray_visible_for_log = bool(getattr(self, '_tray_icon', None) and self._tray_icon.isVisible())
+            self._slog.info(f"closeEvent: _allow_close={self._allow_close}, tray_visible={_tray_visible_for_log}, welcome_closed={welcome_closed}")
+            # Bug #3 fix (4.0.21.2): tray-hide-on-X branch removed.
+            # X-close now always falls through to super().closeEvent() → app exits → mutex released.
+            # Tray icon remains functional during app lifetime for Settings / Exit menu actions.
+            # Original branch preserved in git history; restore via git revert if needed.
+            pass
         except Exception:
             pass
+        self._slog.info("closeEvent: exiting application (not minimizing to tray)")
         super().closeEvent(event)
     
     # ---- Installer autostart helpers (tray menu) ----
