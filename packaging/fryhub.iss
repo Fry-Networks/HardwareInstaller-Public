@@ -1,4 +1,4 @@
-; Fry Hub — Inno Setup wrapper for the PyInstaller installer exe.
+﻿; Fry Hub — Inno Setup wrapper for the PyInstaller installer exe.
 ; Built via: build_cli.py --inno  (see build_inno() in build_cli.py)
 ; Direct compile:  ISCC.exe /DAppVersion=4.0.16 packaging/fryhub.iss
 
@@ -25,7 +25,7 @@ PrivilegesRequiredOverridesAllowed=
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=FryHubSetup-{#AppVersion}
-SetupIconFile=..\resources\frynetworks_logo.ico
+SetupIconFile=..\resources\fryhub.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
 Compression=lzma2
