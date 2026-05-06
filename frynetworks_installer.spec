@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller spec file for FryNetworks Installer
 This ensures the installer is built with proper Windows settings to prevent duplicate tray icons.
@@ -12,7 +12,7 @@ version_str = "1.0.0"
 try:
     with open('version.py', 'r') as f:
         for line in f:
-            if '__version__' in line:
+            if 'WINDOWS_VERSION' in line and '=' in line:
                 version_str = line.split('=')[1].strip().strip('"').strip("'")
                 break
 except Exception:
@@ -77,7 +77,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='resources/frynetworks_logo.ico',
+    icon='resources/fryhub.ico',
     uac_admin=True,  # Request admin privileges
     # Windows-specific settings to prevent duplicate icons
     version='version_info.txt' if Path('version_info.txt').exists() else None,
