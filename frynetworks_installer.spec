@@ -27,6 +27,7 @@ a = Analysis(
     datas=[
         ('build_config.json', '.'),
         ('resources/background.png', 'resources'),
+        ('resources/fryhub.ico', 'resources'),
         ('resources/frynetworks_logo.ico', 'resources'),
         ('resources/embedded', 'resources/embedded'),
         ('SDK', 'SDK'),

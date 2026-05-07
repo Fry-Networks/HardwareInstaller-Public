@@ -238,6 +238,7 @@ try {
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
         --add-data "resources\frynetworks_splash.png;resources" `
+        --add-data "resources\fryhub.ico;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
         --add-data "resources\embedded;resources\embedded" `
         --add-data "SDK;SDK" `

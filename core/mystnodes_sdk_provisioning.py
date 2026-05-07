@@ -245,6 +245,25 @@ def provision_mystnodes_sdk_at_install(
     if not token:
         return StepResult(False, "0/6", "MYST_REG_TOKEN missing from build_config.json")
 
+    # 4.0.21.4: Stop existing SDK service + kill lingering process before binary copy.
+    # Prevents WinError 32 on reinstall/upgrade when sdk_client.exe is already running.
+    if nssm_path.exists():
+        try:
+            subprocess.run(
+                [str(nssm_path), "stop", SDK_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", SDK_BINARY_NAME],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    time.sleep(2)  # Brief pause for file handles to release
+
     steps = [
         ("1/6", "stage_binary", lambda: _step_stage_binary(install_root)),
         ("2/6", "install_service", lambda: _step_install_service(install_root, nssm_path)),

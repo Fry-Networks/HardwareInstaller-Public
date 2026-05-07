@@ -794,14 +794,22 @@ def launch_gui(args):
         socket.connectToServer(server_name)
         
         if socket.waitForConnected(500):
-            # Another instance is running - send quit command and wait for it to exit
+            # Another instance is running — decide SHOW vs QUIT
+            # QUIT: upgrade path (--quiet from updater) — old exits, new takes over
+            # SHOW: normal relaunch — old restores from tray, new exits
             try:
-                socket.write(b"QUIT")
+                msg = b"QUIT" if getattr(args, 'quiet', False) else b"SHOW"
+                socket.write(msg)
                 socket.flush()
                 socket.waitForBytesWritten(1000)
                 socket.disconnectFromServer()
-                
-                # Wait up to 3 seconds for the old instance to exit
+
+                if msg == b"SHOW":
+                    # Old instance will restore from tray; we exit cleanly
+                    _slog.info("Sent SHOW to existing instance — exiting")
+                    return 0
+
+                # QUIT path: wait up to 3 seconds for the old instance to exit
                 import time
                 for _ in range(30):
                     time.sleep(0.1)
@@ -899,24 +907,31 @@ def launch_gui(args):
         window._quiet_mode = getattr(args, 'quiet', False)
         _slog.info("FryNetworksInstallerWindow created successfully (quiet=%s)", window._quiet_mode)
         
-        # Connect the local server to handle quit requests from new instances
+        # Connect the local server to handle requests from new instances
         def handle_new_connection():
             """Handle connection from a new instance trying to start."""
             client_socket = local_server.nextPendingConnection()
             if client_socket:
                 def read_data():
                     data = client_socket.readAll()
-                    if data and b"QUIT" in bytes(data):
-                        # New instance is asking us to quit
-                        print("New installer instance detected - exiting old instance...")
+                    raw = bytes(data)
+                    if b"QUIT" in raw:
+                        # Upgrade path: new instance is replacing us
+                        _slog.info("IPC: received QUIT — exiting for upgrade")
                         window._allow_close = True
                         tray = getattr(window, '_tray_icon', None)
                         if tray:
                             tray.hide()
                         window.close()
                         app.quit()
+                    elif b"SHOW" in raw:
+                        # Normal relaunch: bring existing instance to front
+                        _slog.info("IPC: received SHOW — restoring from tray")
+                        window.show()
+                        window.raise_()
+                        window.activateWindow()
                     client_socket.disconnectFromServer()
-                
+
                 client_socket.readyRead.connect(read_data)
                 # Also read immediately in case data already arrived
                 if client_socket.bytesAvailable() > 0:
