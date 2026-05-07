@@ -4171,23 +4171,23 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        """Handle close events by exiting the application.
+        """Minimize to tray on X-close; exit only via tray 'Exit Fry Hub' or QUIT IPC.
 
-        Bug #3 fix (4.0.21.2): tray-hide-on-X behavior removed. X-close always exits,
-        ensuring the single-instance mutex is released via aboutToQuit cleanup.
+        4.0.21.4: restored tray-hide-on-X (reverts Bug #3 fix from 4.0.21.2).
+        Mutex safety: aboutToQuit releases the mutex only when QApplication.quit()
+        fires (tray Exit or QUIT IPC), not on window hide.
         """
-        try:
-            welcome_closed = getattr(self, '_welcome_closed_by_user', False)
-            _tray_visible_for_log = bool(getattr(self, '_tray_icon', None) and self._tray_icon.isVisible())
-            self._slog.info(f"closeEvent: _allow_close={self._allow_close}, tray_visible={_tray_visible_for_log}, welcome_closed={welcome_closed}")
-            # Bug #3 fix (4.0.21.2): tray-hide-on-X branch removed.
-            # X-close now always falls through to super().closeEvent() → app exits → mutex released.
-            # Tray icon remains functional during app lifetime for Settings / Exit menu actions.
-            # Original branch preserved in git history; restore via git revert if needed.
-            pass
-        except Exception:
-            pass
-        self._slog.info("closeEvent: exiting application (not minimizing to tray)")
+        if self._allow_close:
+            self._slog.info("closeEvent: _allow_close=True, exiting")
+            super().closeEvent(event)
+            return
+        tray = getattr(self, '_tray_icon', None)
+        if tray and tray.isVisible():
+            event.ignore()
+            self.hide()
+            self._slog.info("closeEvent: minimized to tray")
+            return
+        self._slog.info("closeEvent: no tray available, exiting")
         super().closeEvent(event)
     
     # ---- Installer autostart helpers (tray menu) ----
