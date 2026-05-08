@@ -170,7 +170,7 @@ def _download_hub_setup(
         return None
 
 
-def _attempt_hub_update_check(args) -> None:
+def _attempt_hub_update_check(args, window=None) -> None:
     """Launch-time Hub self-update check.
 
     Contract: returns None on EVERY failure mode.  Hub launch must NEVER fail
@@ -178,7 +178,7 @@ def _attempt_hub_update_check(args) -> None:
     (Inno installer launched cleanly, current process should exit).
     """
     try:
-        _attempt_hub_update_check_inner(args)
+        _attempt_hub_update_check_inner(args, window)
     except Exception as exc:
         # DIAG2: capture swallowed exception to file (GUI subsystem hides stdout)
         import traceback as _diag2_tb
@@ -194,7 +194,7 @@ def _attempt_hub_update_check(args) -> None:
         _logger.debug("Hub update check failed (%s); continuing", exc)
 
 
-def _attempt_hub_update_check_inner(args) -> None:
+def _attempt_hub_update_check_inner(args, window=None) -> None:
     # 1. Flag guard
     if getattr(args, "no_update_check", False):
         return
@@ -213,6 +213,14 @@ def _attempt_hub_update_check_inner(args) -> None:
 
     # 3. Read hub config
     config = read_hub_config()
+
+    # Phase 4 fix: clear stale pending state if local version already matches
+    pending_ver = config.get("update_pending_version")
+    if pending_ver and isinstance(pending_ver, str):
+        if _compare_versions(WINDOWS_VERSION, pending_ver) >= 0:
+            config["update_pending"] = False
+            config["update_pending_version"] = None
+            write_hub_config(config)
 
     # 4. Handle CLI config-persist flags
     if getattr(args, "auto_update_hub", False):
@@ -258,30 +266,44 @@ def _attempt_hub_update_check_inner(args) -> None:
         )
         if setup is None:
             return  # download failed — don't block Hub launch
-        _launch_hub_setup_and_exit(setup, config, manifest)
+        # Phase 4 fix: mark pending and pass window for error dialog
+        config["update_pending"] = True
+        config["update_pending_version"] = manifest["hub_version"]
+        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+        config["last_seen_hub_version"] = manifest["hub_version"]
+        write_hub_config(config)
+        _launch_hub_setup_and_exit(setup, config, manifest, window)
         return  # _launch_hub_setup_and_exit calls sys.exit on success; if it returns, continue
 
     # 9. Show modal (needs QApplication to already exist)
     try:
         from PySide6 import QtWidgets
 
-        dlg = QtWidgets.QMessageBox()
+        # Phase 4 fix: parent dialog to main window + force front/focus
+        dlg = QtWidgets.QMessageBox(parent=window)
         dlg.setWindowIcon(QtWidgets.QApplication.instance().windowIcon())
 
-        if force_update:
+        # Phase 4 fix: detect pending retry state
+        is_pending = (
+            config.get("update_pending")
+            and config.get("update_pending_version") == new_ver
+        )
+
+        if is_pending:
+            dlg.setWindowTitle("Fry Hub Update Incomplete")
+            dlg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+            dlg.setText("A previous update did not finish installing.")
+            dlg.setInformativeText(
+                f"Current: v{cur_ver}\nPending: v{new_ver}\n\n"
+                "Retry installation now?"
+            )
+        elif force_update:
             dlg.setWindowTitle("Fry Hub Update Required")
             dlg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
             dlg.setText("A required update must be installed before continuing.")
             dlg.setInformativeText(
                 f"Current: v{cur_ver}\nRequired: v{new_ver}"
             )
-            update_btn = dlg.addButton(
-                "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
-            )
-            exit_btn = dlg.addButton(
-                "Exit", QtWidgets.QMessageBox.ButtonRole.RejectRole
-            )
-            auto_cb = None
         else:
             dlg.setWindowTitle("Fry Hub Update Available")
             dlg.setIcon(QtWidgets.QMessageBox.Icon.Information)
@@ -290,9 +312,16 @@ def _attempt_hub_update_check_inner(args) -> None:
                 f"Current: v{cur_ver}\nAvailable: v{new_ver}\n\n"
                 "Download and install now?"
             )
-            update_btn = dlg.addButton(
-                "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+
+        update_btn = dlg.addButton(
+            "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        )
+        if force_update:
+            exit_btn = dlg.addButton(
+                "Exit", QtWidgets.QMessageBox.ButtonRole.RejectRole
             )
+            auto_cb = None
+        else:
             skip_btn = dlg.addButton(
                 "Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole
             )
@@ -302,6 +331,10 @@ def _attempt_hub_update_check_inner(args) -> None:
             dlg.setCheckBox(auto_cb)
 
         dlg.setDefaultButton(update_btn)
+        # Phase 4 fix: deterministic front/focus on Windows
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         dlg.exec()
         clicked = dlg.clickedButton()
 
@@ -317,13 +350,21 @@ def _attempt_hub_update_check_inner(args) -> None:
                 config["auto_update_hub"] = True
             config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
             config["last_seen_hub_version"] = new_ver
+            # Phase 4 fix: mark update as pending before handoff
+            config["update_pending"] = True
+            config["update_pending_version"] = new_ver
             write_hub_config(config)
-            _launch_hub_setup_and_exit(setup, config, manifest)
+            _launch_hub_setup_and_exit(setup, config, manifest, window)
             return
         else:
             # Skip or Exit
             config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
             config["last_seen_hub_version"] = new_ver
+            # Phase 4 fix: if user exits a forced update, mark pending
+            # so next launch shows retry dialog instead of raw force prompt
+            if force_update:
+                config["update_pending"] = True
+                config["update_pending_version"] = new_ver
             write_hub_config(config)
             if force_update:
                 sys.exit(0)  # Required update refused — exit before event loop
@@ -334,7 +375,7 @@ def _attempt_hub_update_check_inner(args) -> None:
         return
 
 
-def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict) -> None:
+def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, window=None) -> None:
     """Launch Inno Setup via a PowerShell wrapper that waits for Hub to exit.
 
     Phase 3e Part 3 fix (a): PyInstaller's bootloader parent holds an OS-loader
@@ -428,9 +469,37 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict) ->
             close_fds=True,
         )
         _logger.info("Hub-update wrapper Popen returned PID=%d", p.pid)
+
+        # Phase 4 fix: verify wrapper actually started before exiting FryHub
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass  # Still running after 2s — success path
+        else:
+            # Process exited within 2s (failure — policy block, missing exe, etc.)
+            exit_code = p.poll()
+            _logger.error("Update wrapper exited early with code %s", exit_code)
+            if window is not None:
+                from PySide6 import QtWidgets
+                QtWidgets.QMessageBox.critical(
+                    window,
+                    "Update Failed",
+                    "The update installer could not be started. "
+                    "Please try again later or download the latest version from fry.farm.",
+                )
+            return  # Do NOT sys.exit — let Hub continue
+
         sys.exit(0)
     except Exception as exc:
         _logger.error("Failed to launch update wrapper: %s", exc)
+        if window is not None:
+            from PySide6 import QtWidgets
+            QtWidgets.QMessageBox.critical(
+                window,
+                "Update Failed",
+                "The update installer could not be started. "
+                "Please try again later or download the latest version from fry.farm.",
+            )
         # Do NOT sys.exit — let Hub launch normally
 
 
@@ -977,7 +1046,7 @@ def launch_gui(args):
                     f"size=({window.width()}x{window.height()})")
 
         # Phase 3b: Hub self-update check — deferred to post-show so window is visible first
-        QtCore.QTimer.singleShot(200, lambda: _attempt_hub_update_check(args))
+        QtCore.QTimer.singleShot(200, lambda: _attempt_hub_update_check(args, window))
 
         # Close Qt splash synchronously now that the window is visible + activated.
         # Previous design used QTimer.singleShot(150, ...) but the timer fires on event-loop

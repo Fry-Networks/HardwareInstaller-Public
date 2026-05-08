@@ -20,6 +20,8 @@ def read_hub_config() -> dict:
         "auto_update_hub": False,
         "last_update_check_at": None,
         "last_seen_hub_version": None,
+        "update_pending": False,
+        "update_pending_version": None,
     }
     try:
         text = hub_config_path().read_text(encoding="utf-8")
