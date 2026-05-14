@@ -72,8 +72,8 @@ class _WelcomeDataWorker(QtCore.QThread):
             'test_windows_set': set(), 'test_linux_set': set(),
         }
         try:
-            client = ExternalApiClient(self._api_base_url, token=self._api_token, timeout=5.0)
-            client._RETRY_DELAYS = []
+            client = ExternalApiClient(self._api_base_url, token=self._api_token, timeout=10.0)
+            client._RETRY_DELAYS = [1, 2, 4]
 
             slog.info("_WelcomeDataWorker: fetching windows installers")
             result['supported_windows'] = client.get_supported_installers('windows', use_test=False) or {}
@@ -109,6 +109,23 @@ class _FirewallSweepWorker(QtCore.QThread):
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _VersionFetchWorker(QtCore.QThread):
+    """Fetches latest versions for installations in a background thread."""
+    finished = QtCore.Signal(object, int)
+
+    def __init__(self, fetch_callable: Callable[[], Dict[str, Any]], seq: int, parent=None):
+        super().__init__(parent)
+        self._fetch = fetch_callable
+        self._seq = seq
+
+    def run(self):
+        try:
+            result = self._fetch()
+            self.finished.emit(result, self._seq)
+        except Exception as e:
+            self.finished.emit({"_error": str(e)}, self._seq)
 
 
 class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
@@ -188,6 +205,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self._last_install_ctx: Optional[Dict[str, Any]] = None
         self._firewall_sweep_started: bool = False
         self._firewall_worker: Optional[_FirewallSweepWorker] = None
+        self._version_fetch_seq: int = 0
+        self._active_version_workers: dict[int, _VersionFetchWorker] = {}
         self._browsers_running_at_install: list = []
 
         # Track whether the progress log has been seeded for the current run (kept for safety)
@@ -2019,125 +2038,22 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self._update_version_warning_label(None)
                 return
             
-            # Get latest versions from API for comparison
-            latest_versions = self._fetch_latest_versions_for_installations(installations)
-            
-            # Populate table
-            for row_idx, install in enumerate(installations):
-                table.insertRow(row_idx)
-                
-                # Column 0: Miner Key
-                miner_key = install.get('config', {}).get('miner_key', 'N/A')
-                key_item = QtWidgets.QTableWidgetItem(miner_key)
-                key_item.setData(QtCore.Qt.ItemDataRole.UserRole, install)  # Store full install data
-                key_item.setToolTip(miner_key)  # Show full key on hover
-                table.setItem(row_idx, 0, key_item)
-                
-                # Column 1: GUI Version
-                gui_version = install.get('config', {}).get('gui_version', 'Unknown')
-                gui_version_item = QtWidgets.QTableWidgetItem(gui_version)
-                gui_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_idx, 1, gui_version_item)
-                
-                # Column 2: GUI Status
-                miner_code = str(install.get('miner_code') or '')
-                latest = latest_versions.get(miner_code, {})
-                latest_gui = latest.get('software_version', '')
-                gui_uptodate = False
-                gui_symbol = "?"
-                gui_tooltip = "Version status unknown"
-                if latest_gui and gui_version != 'Unknown':
-                    gui_uptodate = (gui_version == latest_gui)
-                    if gui_uptodate:
-                        gui_symbol = "✓"
-                        gui_tooltip = "Up-to-date"
-                    else:
-                        gui_symbol = "⚠"
-                        gui_tooltip = f"Update available: {latest_gui}"
-                elif latest_gui:
-                    gui_symbol = "⚠"
-                    gui_tooltip = f"Installed version unknown. Latest: {latest_gui}"
-                gui_status_item = QtWidgets.QTableWidgetItem(gui_symbol)
-                gui_status_item.setToolTip(gui_tooltip)
-                gui_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if gui_uptodate:
-                    gui_status_item.setForeground(QtGui.QColor("#10b981"))  # Green
-                elif latest_gui:
-                    gui_status_item.setForeground(QtGui.QColor("#f59e0b"))  # Amber when update needed/unknown
-                else:
-                    gui_status_item.setForeground(QtGui.QColor("#9ca3af"))  # Neutral gray
-                table.setItem(row_idx, 2, gui_status_item)
-                
-                # Column 3: PoC Version
-                poc_version = install.get('config', {}).get('poc_version', 'Unknown')
-                poc_version_item = QtWidgets.QTableWidgetItem(poc_version)
-                poc_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_idx, 3, poc_version_item)
-                
-                # Column 4: PoC Status
-                latest_poc = latest.get('poc_version', '')
-                poc_uptodate = False
-                poc_symbol = "?"
-                poc_tooltip = "Version status unknown"
-                if latest_poc and poc_version != 'Unknown':
-                    poc_uptodate = (poc_version == latest_poc)
-                    if poc_uptodate:
-                        poc_symbol = "✓"
-                        poc_tooltip = "Up-to-date"
-                    else:
-                        poc_symbol = "⚠"
-                        poc_tooltip = f"Update available: {latest_poc}"
-                elif latest_poc:
-                    poc_symbol = "⚠"
-                    poc_tooltip = f"Installed version unknown. Latest: {latest_poc}"
-                poc_status_item = QtWidgets.QTableWidgetItem(poc_symbol)
-                poc_status_item.setToolTip(poc_tooltip)
-                poc_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if poc_uptodate:
-                    poc_status_item.setForeground(QtGui.QColor("#10b981"))  # Green
-                elif latest_poc:
-                    poc_status_item.setForeground(QtGui.QColor("#f59e0b"))  # Amber when update needed/unknown
-                else:
-                    poc_status_item.setForeground(QtGui.QColor("#9ca3af"))  # Neutral gray
-                table.setItem(row_idx, 4, poc_status_item)
-                
-                # Column 5: Action buttons
-                action_widget = QtWidgets.QWidget()
-                action_layout = QtWidgets.QHBoxLayout(action_widget)
-                action_layout.setContentsMargins(4, 2, 4, 2)  # Small margins on all sides
-                action_layout.setSpacing(4)
-                
-                # Combined Start button
-                action_layout.addStretch()
-                start_btn = QtWidgets.QPushButton("Start")
-                start_btn.setFixedSize(60, 24)
-                start_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
-                start_btn.clicked.connect(lambda checked, r=row_idx: self._start_miner(r, use_dialog))
-                action_layout.addWidget(start_btn)
-                
-                needs_update = (latest_gui and not gui_uptodate) or (latest_poc and not poc_uptodate)
-                if needs_update:
-                    update_btn = QtWidgets.QPushButton("Update")
-                    update_btn.setFixedSize(60, 24)
-                    update_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
-                    update_btn.clicked.connect(lambda checked, r=row_idx: self._update_installation(r, use_dialog))
-                    action_layout.addWidget(update_btn)
-                    
-                uninstall_btn = QtWidgets.QPushButton("Uninstall")
-                uninstall_btn.setFixedSize(70, 24)
-                uninstall_btn.setStyleSheet("min-width: 70px; max-width: 70px; padding-top: 0px; padding-bottom: 4px;")
-                uninstall_btn.clicked.connect(lambda checked, r=row_idx: self._uninstall_installation(r, use_dialog))
-                action_layout.addWidget(uninstall_btn)
-                action_layout.addStretch()
-                
-                table.setCellWidget(row_idx, 5, action_widget)
-            
-            # Adjust row heights to fully show buttons
-            for row_idx in range(table.rowCount()):
-                table.setRowHeight(row_idx, 40)
-
-            warnings = self._build_version_warning_entries(installations, latest_versions)
-            self._handle_version_warning_update(warnings)
+            # Launch worker for version fetch + table population
+            if any(w.isRunning() for w in self._active_version_workers.values()):
+                self.statusBar().showMessage("Refresh already in progress...")
+                return
+            self._version_fetch_seq += 1
+            seq = self._version_fetch_seq
+            worker = _VersionFetchWorker(
+                lambda: self._fetch_latest_versions_for_installations(installations),
+                seq,
+                parent=self
+            )
+            self._active_version_workers[seq] = worker
+            worker.finished.connect(
+                lambda result, got_seq: self._on_versions_fetched(installations, result, got_seq, use_dialog)
+            )
+            worker.start()
     
         except Exception as e:
             import traceback
@@ -2147,6 +2063,136 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 "Error",
                 f"Failed to detect installations:\n{str(e)}\n\nSee console for details."
             )
+
+    def _on_versions_fetched(self, installations: List[Dict[str, Any]], result: Dict[str, Any], got_seq: int, use_dialog: bool = False) -> None:
+        """Slot called on main thread when version fetch worker finishes."""
+        self._active_version_workers.pop(got_seq, None)
+        if got_seq != self._version_fetch_seq:
+            return
+        if result is None or isinstance(result, dict) and result.get("_error"):
+            self._slog.warning(f"_on_versions_fetched: fetch failed — {result}")
+            return
+        latest_versions = result
+        # --- table population (moved from _refresh_installations) ---
+        if use_dialog:
+            table = getattr(self, '_dialog_installations_table', None)
+        else:
+            table = getattr(self, 'installations_table', None)
+        if not table:
+            return
+        table.setRowCount(0)
+        for row_idx, install in enumerate(installations):
+            table.insertRow(row_idx)
+            miner_key = install.get('config', {}).get('miner_key', 'N/A')
+            key_item = QtWidgets.QTableWidgetItem(miner_key)
+            key_item.setData(QtCore.Qt.ItemDataRole.UserRole, install)
+            key_item.setToolTip(miner_key)
+            table.setItem(row_idx, 0, key_item)
+            gui_version = install.get('config', {}).get('gui_version', 'Unknown')
+            gui_version_item = QtWidgets.QTableWidgetItem(gui_version)
+            gui_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row_idx, 1, gui_version_item)
+            miner_code = str(install.get('miner_code') or '')
+            latest = latest_versions.get(miner_code, {})
+            latest_gui = latest.get('software_version', '')
+            gui_uptodate = False
+            gui_symbol = "?"
+            gui_tooltip = "Version status unknown"
+            if latest_gui and gui_version != 'Unknown':
+                gui_uptodate = (gui_version == latest_gui)
+                if gui_uptodate:
+                    gui_symbol = "✓"
+                    gui_tooltip = "Up-to-date"
+                else:
+                    gui_symbol = "⚠"
+                    gui_tooltip = f"Update available: {latest_gui}"
+            elif latest_gui:
+                gui_symbol = "⚠"
+                gui_tooltip = f"Installed version unknown. Latest: {latest_gui}"
+            gui_status_item = QtWidgets.QTableWidgetItem(gui_symbol)
+            gui_status_item.setToolTip(gui_tooltip)
+            gui_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            if gui_uptodate:
+                gui_status_item.setForeground(QtGui.QColor("#10b981"))
+            elif latest_gui:
+                gui_status_item.setForeground(QtGui.QColor("#f59e0b"))
+            else:
+                gui_status_item.setForeground(QtGui.QColor("#9ca3af"))
+            table.setItem(row_idx, 2, gui_status_item)
+            poc_version = install.get('config', {}).get('poc_version', 'Unknown')
+            poc_version_item = QtWidgets.QTableWidgetItem(poc_version)
+            poc_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row_idx, 3, poc_version_item)
+            latest_poc = latest.get('poc_version', '')
+            poc_uptodate = False
+            poc_symbol = "?"
+            poc_tooltip = "Version status unknown"
+            if latest_poc and poc_version != 'Unknown':
+                poc_uptodate = (poc_version == latest_poc)
+                if poc_uptodate:
+                    poc_symbol = "✓"
+                    poc_tooltip = "Up-to-date"
+                else:
+                    poc_symbol = "⚠"
+                    poc_tooltip = f"Update available: {latest_poc}"
+            elif latest_poc:
+                poc_symbol = "⚠"
+                poc_tooltip = f"Installed version unknown. Latest: {latest_poc}"
+            poc_status_item = QtWidgets.QTableWidgetItem(poc_symbol)
+            poc_status_item.setToolTip(poc_tooltip)
+            poc_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            if poc_uptodate:
+                poc_status_item.setForeground(QtGui.QColor("#10b981"))
+            elif latest_poc:
+                poc_status_item.setForeground(QtGui.QColor("#f59e0b"))
+            else:
+                poc_status_item.setForeground(QtGui.QColor("#9ca3af"))
+            table.setItem(row_idx, 4, poc_status_item)
+            action_widget = QtWidgets.QWidget()
+            action_layout = QtWidgets.QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(4, 2, 4, 2)
+            action_layout.setSpacing(4)
+            action_layout.addStretch()
+            start_btn = QtWidgets.QPushButton("Start")
+            start_btn.setFixedSize(60, 24)
+            start_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
+            start_btn.clicked.connect(lambda checked, r=row_idx: self._start_miner(r, use_dialog))
+            action_layout.addWidget(start_btn)
+            needs_update = (latest_gui and not gui_uptodate) or (latest_poc and not poc_uptodate)
+            if needs_update:
+                update_btn = QtWidgets.QPushButton("Update")
+                update_btn.setFixedSize(60, 24)
+                update_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
+                update_btn.clicked.connect(lambda checked, r=row_idx: self._update_installation(r, use_dialog))
+                action_layout.addWidget(update_btn)
+            uninstall_btn = QtWidgets.QPushButton("Uninstall")
+            uninstall_btn.setFixedSize(70, 24)
+            uninstall_btn.setStyleSheet("min-width: 70px; max-width: 70px; padding-top: 0px; padding-bottom: 4px;")
+            uninstall_btn.clicked.connect(lambda checked, r=row_idx: self._uninstall_installation(r, use_dialog))
+            action_layout.addWidget(uninstall_btn)
+            action_layout.addStretch()
+            table.setCellWidget(row_idx, 5, action_widget)
+        for row_idx in range(table.rowCount()):
+            table.setRowHeight(row_idx, 40)
+        warnings = self._build_version_warning_entries(installations, latest_versions)
+        self._handle_version_warning_update(warnings)
+
+    def _on_version_timer_result(self, result: Dict[str, Any], got_seq: int) -> None:
+        """Slot called on main thread when timer-driven version fetch finishes."""
+        self._active_version_workers.pop(got_seq, None)
+        if got_seq != self._version_fetch_seq:
+            return
+        if result is None or isinstance(result, dict) and result.get("_error"):
+            self._slog.warning(f"_on_version_timer_result: fetch failed — {result}")
+            return
+        latest_versions = result
+        # Re-detect installations for timer path (may have changed since fetch started)
+        try:
+            installations = ConfigManager().detect_existing_installations()
+            warnings = self._build_version_warning_entries(installations, latest_versions)
+            self._handle_version_warning_update(warnings)
+        except Exception as e:
+            self._update_version_warning_label([f"Unable to check versions: {e}"])
 
     def _refresh_manage_views_once(self) -> None:
         """Refresh manage tables (dialog and panel) once if they exist."""
@@ -2417,15 +2463,26 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
     def _run_version_status_timer(self) -> None:
         """Periodic timer callback to refresh version warnings."""
         try:
+            if any(w.isRunning() for w in self._active_version_workers.values()):
+                return
             config_manager = ConfigManager()
             installations = config_manager.detect_existing_installations()
             self._ensure_version_timer_state(bool(installations))
             if not installations:
                 self._handle_version_warning_update([])
                 return
-            latest_versions = self._fetch_latest_versions_for_installations(installations)
-            warnings = self._build_version_warning_entries(installations, latest_versions)
-            self._handle_version_warning_update(warnings)
+            self._version_fetch_seq += 1
+            seq = self._version_fetch_seq
+            worker = _VersionFetchWorker(
+                lambda: self._fetch_latest_versions_for_installations(installations),
+                seq,
+                parent=self
+            )
+            self._active_version_workers[seq] = worker
+            worker.finished.connect(
+                lambda result, got_seq: self._on_version_timer_result(result, got_seq)
+            )
+            worker.start()
         except Exception as exc:
             self._update_version_warning_label([f"Unable to check versions: {exc}"])
     
@@ -3933,6 +3990,45 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             return False
 
+    def _app_root(self) -> Path:
+        """Return app root for both frozen PyInstaller and source runs."""
+        if getattr(sys, 'frozen', False):
+            # PyInstaller bundle: executable lives at app root
+            return Path(sys.executable).resolve().parent
+        else:
+            # Source run: __file__ is gui/installer_window.py; app root is parent of gui/
+            return Path(__file__).resolve().parent.parent
+
+    def _enable_updater_task(self) -> tuple[bool, str]:
+        """Register FryNetworksUpdater scheduled task using bundled PS1."""
+        try:
+            ps1_path = self._app_root() / "tools" / "register_updater_task.ps1"
+            if not ps1_path.exists():
+                return False, f"register_updater_task.ps1 not found at {ps1_path}"
+            result = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(ps1_path)],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if result.returncode != 0:
+                return False, f"Task register failed: {result.stderr or result.stdout or 'unknown'}"
+            return True, "Updater task registered."
+        except Exception as exc:
+            return False, f"Task register exception: {exc}"
+
+    def _disable_updater_task(self) -> tuple[bool, str]:
+        """Remove FryNetworksUpdater scheduled task. Idempotent."""
+        try:
+            result = subprocess.run(
+                ["schtasks", "/Delete", "/TN", "FryNetworksUpdater", "/F"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            # rc=0 on success or task-not-found (silently ignored by /F)
+            if result.returncode != 0 and "Cannot find the file" not in (result.stderr or ""):
+                return False, f"Task delete failed: {result.stderr or result.stdout or 'unknown'}"
+            return True, "Updater task removed."
+        except Exception as exc:
+            return False, f"Task delete exception: {exc}"
+
     def _toggle_autoupdate(self, checked: bool) -> None:
         try:
             from core.hub_config import read_hub_config, write_hub_config
@@ -3947,6 +4043,15 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             # Revert tray toggle to previous state
             if hasattr(self, '_tray_autoupdate_action'):
                 self._tray_autoupdate_action.setChecked(not checked)
+            return
+
+        if checked:
+            ok, msg = self._enable_updater_task()
+        else:
+            ok, msg = self._disable_updater_task()
+        if not ok:
+            LOGGER.warning("Updater task toggle failed: %s", msg)
+            # Do not crash UI; log and continue
 
     def _show_hub_settings_dialog(self) -> None:
         # Singleton: if dialog already open, raise it
