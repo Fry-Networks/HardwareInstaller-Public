@@ -1,7 +1,7 @@
 # Registers or removes the FryNetworks updater scheduled task.
 # The updater auto-discovers version from installed configs (no --current-version needed).
 param(
-    [string]$UpdaterPath = "C:\ProgramData\FryNetworks\updater\frynetworks_updater.exe",
+    [string]$UpdaterPath = (Join-Path (Split-Path $PSScriptRoot) "frynetworks_updater.exe"),
     [string]$TaskName = "FryNetworksUpdater",
     [switch]$Remove = $false,
     [switch]$RunNow = $false,

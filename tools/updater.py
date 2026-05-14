@@ -260,6 +260,7 @@ def run_installer(installer_path: Path, quiet: bool, log_file: Path) -> int:
     args = [str(installer_path)]
     if quiet:
         args.append("--quiet")
+        args.append("--no-update-check")
     write_log(f"[INFO] Update in progress — services will be down during install window.", log_file)
     write_log(f"[INFO] Running installer: {' '.join(args)}", log_file)
 
