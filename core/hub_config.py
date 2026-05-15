@@ -24,7 +24,7 @@ def read_hub_config() -> dict:
         "update_pending_version": None,
     }
     try:
-        text = hub_config_path().read_text(encoding="utf-8")
+        text = hub_config_path().read_text(encoding="utf-8-sig")
         data = json.loads(text)
         if isinstance(data, dict):
             defaults.update(data)

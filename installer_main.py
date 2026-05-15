@@ -23,6 +23,7 @@ import json
 import os
 import logging
 import subprocess
+import threading
 import tempfile
 import urllib.error
 import urllib.request
@@ -79,7 +80,7 @@ def _attempt_registry_refresh() -> None:
         MinerKeyParser.MINER_TYPES = new_types
         _logger.info("Registry refreshed from CDN: %d miner types", len(new_types))
     except Exception as e:
-        _logger.debug("Registry refresh failed (non-critical): %s", e)
+        _logger.warning("Registry refresh failed (non-critical): %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +190,8 @@ def _attempt_hub_update_check(args, window=None) -> None:
                 _diag2_f.write('=== _attempt_hub_update_check swallow @ ' + __import__('datetime').datetime.now().isoformat() + ' ===\n')
                 _diag2_f.write(_diag2_tb.format_exc())
                 _diag2_f.write('\n')
-        except Exception:
-            pass
+        except Exception as _diag2_write_err:
+            _logger.debug("Hub update diag write failed: %s", _diag2_write_err)
         _logger.debug("Hub update check failed (%s); continuing", exc)
 
 
@@ -215,6 +216,7 @@ def _attempt_hub_update_check_inner(args, window=None) -> None:
     config = read_hub_config()
 
     # Phase 4 fix: clear stale pending state if local version already matches
+    from version import WINDOWS_VERSION
     pending_ver = config.get("update_pending_version")
     if pending_ver and isinstance(pending_ver, str):
         if _compare_versions(WINDOWS_VERSION, pending_ver) >= 0:
@@ -236,7 +238,6 @@ def _attempt_hub_update_check_inner(args, window=None) -> None:
         return
 
     # 6. Compare versions
-    from version import WINDOWS_VERSION
     cmp = _compare_versions(manifest["hub_version"], WINDOWS_VERSION)
     if cmp <= 0:
         return  # no update available
@@ -259,21 +260,11 @@ def _attempt_hub_update_check_inner(args, window=None) -> None:
         / f"FryHubSetup-{new_ver}.exe"
     )
 
-    # 8. Auto-update path (silent, no modal)
+    # 8. Auto-update path (silent, no modal) — offloaded to thread so the event
+    # loop stays responsive during the up-to-120s download.
     if config.get("auto_update_hub") and not force_update:
-        setup = _download_hub_setup(
-            manifest["setup_url"], dest, manifest["setup_sha256"]
-        )
-        if setup is None:
-            return  # download failed — don't block Hub launch
-        # Phase 4 fix: mark pending and pass window for error dialog
-        config["update_pending"] = True
-        config["update_pending_version"] = manifest["hub_version"]
-        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
-        config["last_seen_hub_version"] = manifest["hub_version"]
-        write_hub_config(config)
-        _launch_hub_setup_and_exit(setup, config, manifest, window)
-        return  # _launch_hub_setup_and_exit calls sys.exit on success; if it returns, continue
+        _threaded_download_and_launch(manifest, dest, config, window)
+        return  # worker marshals result back to main thread when ready
 
     # 9. Show modal (needs QApplication to already exist)
     try:
@@ -339,22 +330,13 @@ def _attempt_hub_update_check_inner(args, window=None) -> None:
         clicked = dlg.clickedButton()
 
         if clicked == update_btn:
-            # Download + verify
-            setup = _download_hub_setup(
-                manifest["setup_url"], dest, manifest["setup_sha256"]
+            # Download + verify — offloaded to thread to keep UI responsive
+            enable_auto = (
+                auto_cb is not None and auto_cb.isChecked()
             )
-            if setup is None:
-                return  # download failed — don't block Hub
-            # Persist auto-update checkbox
-            if auto_cb is not None and auto_cb.isChecked():
-                config["auto_update_hub"] = True
-            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
-            config["last_seen_hub_version"] = new_ver
-            # Phase 4 fix: mark update as pending before handoff
-            config["update_pending"] = True
-            config["update_pending_version"] = new_ver
-            write_hub_config(config)
-            _launch_hub_setup_and_exit(setup, config, manifest, window)
+            _threaded_download_and_launch(
+                manifest, dest, config, window, enable_auto_update=enable_auto
+            )
             return
         else:
             # Skip or Exit
@@ -399,6 +381,7 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, wi
     ps_script = textwrap.dedent("""\
     param(
         [int]$HubPid,
+        [int]$BootloaderPid,
         [string]$InnoExe,
         [string]$InnoLog
     )
@@ -416,14 +399,25 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, wi
     $preSha = (Get-FileHash -Algorithm SHA256 -Path 'C:\Program Files\FryNetworks\\frynetworks_installer.exe' -ErrorAction SilentlyContinue).Hash
     W "Pre-Inno target SHA: $preSha"
 
+    # Phase 3e fix: wait for BOTH Python child AND bootloader parent to exit
+    # Bootloader holds SEC_IMAGE mapping on frynetworks_installer.exe during _MEI cleanup
     $elapsed = 0
-    while ((Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -and ($elapsed -lt 60)) {
+    $hubAlive = $true
+    $blAlive = $true
+    while ($elapsed -lt 60) {
+        $hubAlive = (Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -ne $null
+        $blAlive = (Get-Process -Id $BootloaderPid -ErrorAction SilentlyContinue) -ne $null
+        if ((-not $hubAlive) -and (-not $blAlive)) {
+            W "Post-poll: both PIDs exited after ${elapsed}s"
+            break
+        }
         Start-Sleep -Seconds 1
         $elapsed++
     }
-    W "Post-poll: HubPid alive=$((Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -ne $null) elapsed=$elapsed"
-
-    Start-Sleep -Seconds 3
+    if ($hubAlive -or $blAlive) {
+        W "Post-poll: TIMEOUT after 60s HubAlive=$hubAlive BootloaderAlive=$blAlive"
+        exit 62
+    }
     W "Pre-Inno launch"
 
     try {
@@ -459,6 +453,7 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, wi
                 "-WindowStyle", "Hidden",
                 "-File", str(wrapper_path),
                 "-HubPid", str(os.getpid()),
+                "-BootloaderPid", str(os.getppid()),
                 "-InnoExe", str(setup_exe),
                 "-InnoLog", str(inno_log),
             ],
@@ -501,6 +496,59 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, wi
                 "Please try again later or download the latest version from fry.farm.",
             )
         # Do NOT sys.exit — let Hub launch normally
+
+
+def _threaded_download_and_launch(
+    manifest: dict,
+    dest: Path,
+    config: dict,
+    window,
+    enable_auto_update: bool = False,
+) -> None:
+    """Offload _download_hub_setup to a thread and marshal result back to main thread.
+
+    Keeps the Qt event loop responsive during the up-to-120s download.
+    All UI actions (dialogs / sys.exit) run on the main thread via QTimer.singleShot.
+    """
+    def _download_worker() -> None:
+        try:
+            setup_path = _download_hub_setup(
+                manifest["setup_url"], dest, manifest["setup_sha256"]
+            )
+        except Exception as exc:
+            _logger.warning("Hub update download failed: %s", exc)
+            setup_path = None
+        try:
+            from PySide6 import QtCore
+            QtCore.QTimer.singleShot(
+                0,
+                lambda: _on_download_done(
+                    setup_path, manifest, config, window, enable_auto_update
+                ),
+            )
+        except Exception as exc:
+            _logger.warning("Failed to marshal hub update result: %s", exc)
+
+    def _on_download_done(
+        setup_path: Optional[Path],
+        manifest: dict,
+        config: dict,
+        window,
+        enable_auto_update: bool,
+    ) -> None:
+        if setup_path is None:
+            _logger.debug("Hub update download failed; continuing launch")
+            return
+        if enable_auto_update:
+            config["auto_update_hub"] = True
+        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+        config["last_seen_hub_version"] = manifest["hub_version"]
+        config["update_pending"] = True
+        config["update_pending_version"] = manifest["hub_version"]
+        write_hub_config(config)
+        _launch_hub_setup_and_exit(setup_path, config, manifest, window)
+
+    threading.Thread(target=_download_worker, daemon=True).start()
 
 
 def main():
@@ -701,8 +749,8 @@ def _setup_startup_logger() -> logging.Logger:
             datefmt='%Y-%m-%d %H:%M:%S',
         ))
         logger.addHandler(handler)
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.warning("Startup logger setup failed: %s", e)
 
     return logger
 
@@ -888,9 +936,9 @@ def launch_gui(args):
                         # Old instance has exited
                         break
                     test_socket.disconnectFromServer()
-            except Exception:
-                pass  # Best effort
-        
+            except Exception as exc:
+                _slog.warning("Single-instance socket check failed: %s", exc)
+
         # Clean up any stale server socket
         QtNetwork.QLocalServer.removeServer(server_name)
 
@@ -937,10 +985,10 @@ def launch_gui(args):
                     _spl_os.makedirs(r'C:\temp', exist_ok=True)
                     with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
                         _sf.write(f"=== Qt splash OPEN @ {__import__('datetime').datetime.now().isoformat()} ===\n")
-                except Exception:
-                    pass
-        except Exception:
-            pass  # Non-critical
+                except Exception as e:
+                    _slog.debug("Splash debug log write failed: %s", e)
+        except Exception as e:
+            _slog.debug("Splash setup failed: %s", e)
 
         app.setApplicationName("Fry Hub")
         app.setApplicationVersion("1.0.0")
@@ -952,9 +1000,9 @@ def launch_gui(args):
                 import ctypes
                 # Set the AppUserModelID to a unique identifier for this application
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.frynetworks.installer')
-            except Exception:
-                pass  # Non-critical if this fails
-        
+            except Exception as e:
+                _slog.debug("AppUserModelID set failed: %s", e)
+
         # Enable high DPI scaling support
         app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
         app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
@@ -1013,8 +1061,8 @@ def launch_gui(args):
         try:
             with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
                 _sf.write(f"=== window.show() @ {__import__('datetime').datetime.now().isoformat()} ===\n")
-        except Exception:
-            pass
+        except Exception as e:
+            _slog.debug("window.show() activation log write failed: %s", e)
         _slog.info(f"window.show() returned — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"windowHandle={'exists' if window.windowHandle() else 'None'}")

@@ -1,6 +1,15 @@
 ﻿param([string]$Version = "")
 $ErrorActionPreference = "Stop"
 
+# Guard: quarantine any pre-existing stale build_config.json to prevent embedding dummy config
+$StaleConfigPath = Join-Path $PWD "build_config.json"
+if (Test-Path $StaleConfigPath) {
+    $StaleConfigBackup = "$StaleConfigPath.stale.$(Get-Date -Format 'yyyyMMdd_HHmmss').bak"
+    Copy-Item $StaleConfigPath $StaleConfigBackup -Force
+    Remove-Item $StaleConfigPath -Force
+    Write-Host "  [GUARD] Quarantined stale build_config.json to $StaleConfigBackup" -ForegroundColor Yellow
+}
+
 # 1Password references for retrieving secrets at build time
 $OP_BEARER_TOKEN_REF = "op://HardwareAPI/Hardware_API/API_BEARER_TOKEN"
 $OP_GUI_GITHUB_REPO_REF = "op://VSCode/hardware_exe/Github_repo_hardware_exe"
@@ -170,6 +179,15 @@ $BuildConfig = @{
 } | ConvertTo-Json -Depth 10
 [System.IO.File]::WriteAllText("$PWD\build_config.json", $BuildConfig, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "  [OK] build_config.json created" -ForegroundColor Green
+
+# Validate nested bearer_token key presence
+$BuildConfigObj = $BuildConfig | ConvertFrom-Json
+if ($BuildConfigObj.external_api.PSObject.Properties.Name -contains 'bearer_token') {
+    Write-Host "  [VALIDATE] external_api.bearer_token: PRESENT" -ForegroundColor Green
+} else {
+    Write-Host "  [VALIDATE] external_api.bearer_token: ABSENT" -ForegroundColor Red
+}
+
 Write-Host "`n[3/4] Preparing embedded resources..." -ForegroundColor Yellow
 
 # Copy NSSM (required utility)
@@ -273,7 +291,13 @@ try {
 } finally {
     if (Test-Path "build_config.json") {
         Remove-Item "build_config.json" -Force
-        Write-Host "`n  Cleaned up build_config.json" -ForegroundColor Gray
+        if (Test-Path "build_config.json") {
+            Write-Host "`n  [FAIL] build_config.json cleanup failed — file still exists" -ForegroundColor Red
+        } else {
+            Write-Host "`n  [OK] build_config.json cleaned up" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "`n  [OK] build_config.json already absent" -ForegroundColor Green
     }
     # Clean up embedded NSSM (it's now in the exe)
     if (Test-Path "resources\embedded\nssm.exe") {

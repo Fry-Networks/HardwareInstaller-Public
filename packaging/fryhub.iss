@@ -68,7 +68,7 @@ Root: HKLM; Subkey: "Software\FryNetworks"; ValueType: string; \
 [Run]
 ; Register the FryNetworksUpdater scheduled task. Idempotent per recon.
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\tools\register_updater_task.ps1""" -UpdaterPath """"{app}\frynetworks_updater.exe""""; \
+  Parameters: "-ExecutionPolicy Bypass -File ""{app}\tools\register_updater_task.ps1"" -UpdaterPath ""{app}\frynetworks_updater.exe"""; \
   Flags: runhidden waituntilterminated; \
   StatusMsg: "Registering updater scheduled task..."
 
@@ -77,5 +77,5 @@ Filename: "powershell.exe"; \
 Filename: "{app}\{#AppExeName}"; Parameters: "uninstall --all --remove-data -y"; \
   Flags: runhidden waituntilterminated; RunOnceId: "FryNetworksUninstallAll"
 ; Remove the FryNetworksUpdater scheduled task on uninstall (redundant safety net).
-Filename: "schtasks.exe"; Parameters: "/delete /tn FryNetworksUpdater /f"; \
+Filename: "schtasks.exe"; Parameters: "/delete /tn \FryNetworks\FryNetworksUpdater /f"; \
   Flags: runhidden; RunOnceId: "DelUpdaterTask"

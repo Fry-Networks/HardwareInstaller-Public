@@ -18,6 +18,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, cast, Optional, List, Set, Callable
+import socket
+from datetime import datetime, timezone
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -37,7 +39,7 @@ from tools.theme import Theme
 from tools.banner import TopBanner
 
 # Import external API client from tools package
-from tools.external_api import get_external_api_client, ExternalApiClient, _BUILD_CONFIG
+from tools.external_api import get_external_api_client, get_external_api_client_if_complete, ExternalApiClient, _BUILD_CONFIG
 from version import __version__ as version_str
 
 # Track 3: Mysterium TOS gate + install-time provisioning
@@ -2526,7 +2528,41 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         
         # Perform uninstallation
         self._perform_uninstall(install_data, use_dialog)
-    
+
+    def _read_install_config(self, install_dir: Path) -> Optional[Dict[str, Any]]:
+        """Read and decrypt install_config.enc, returning the config dict or None."""
+        try:
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.fernet import Fernet
+            import base64
+
+            config_path = install_dir / "config" / "install_config.enc"
+            if not config_path.exists():
+                config_path = install_dir / "install_config.enc"
+            if not config_path.exists():
+                return None
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                wrapper = json.load(f)
+            encrypted_data = wrapper.get("data", "")
+            if not encrypted_data:
+                return None
+
+            salt = b'install_config_salt_v1'
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                iterations=100000,
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(b"install_config_encryption_key_v1"))
+            fernet = Fernet(key)
+            decrypted = fernet.decrypt(encrypted_data.encode())
+            return json.loads(decrypted)
+        except Exception:
+            return None
+
     def _start_miner(self, row_idx: int, use_dialog: bool = False):
         """Start/restart both the miner service and GUI."""
         # Get table reference
@@ -2586,7 +2622,28 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self.status_bar.setText(f"Started {miner_name} service")
             else:
                 self._debug_log(f"[START] Service already running")
-            
+
+            # --- Dashboard heartbeat on explicit start ---
+            try:
+                miner_key = install_data.get('config', {}).get('miner_key')
+                install_config = self._read_install_config(install_dir)
+                install_id = install_config.get("install_id") if install_config else None
+                external_ip = install_config.get("external_ip") if install_config else None
+                if miner_key and install_id:
+                    client = get_external_api_client_if_complete(raise_on_missing=False)
+                    if client:
+                        heartbeat_payload = {
+                            "hostname": socket.gethostname(),
+                            "is_installed": True,
+                            "ip_detected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        }
+                        if external_ip:
+                            heartbeat_payload["external_ip"] = external_ip
+                        client.upsert_installation(miner_key, install_id, heartbeat_payload)
+                        self._debug_log(f"[START] Dashboard status synced for {miner_key}")
+            except Exception as hb_err:
+                self._debug_log(f"[START] Dashboard sync skipped: {hb_err}")
+
             # Check if GUI is already running
             gui_exe_name = naming.gui_asset(miner_code, gui_version, windows=True) if gui_version else f"{naming.gui_prefix(miner_code)}.exe"
             gui_running = False
@@ -4019,7 +4076,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         """Remove FryNetworksUpdater scheduled task. Idempotent."""
         try:
             result = subprocess.run(
-                ["schtasks", "/Delete", "/TN", "FryNetworksUpdater", "/F"],
+                ["schtasks", "/Delete", "/TN", r"\FryNetworks\FryNetworksUpdater", "/F"],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             # rc=0 on success or task-not-found (silently ignored by /F)
@@ -5750,7 +5807,9 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                             _df.write(tb + "\n")
                 except Exception:
                     pass
-                self.installation_failed("Installation error", [str(e)])
+                # Surface exception class + message to user instead of generic text
+                user_msg = f"Installation error: {type(e).__name__}: {e}"
+                self.installation_failed(user_msg, [str(e)])
         
         self.installation_thread = threading.Thread(target=install, daemon=True)
         self.installation_thread.start()

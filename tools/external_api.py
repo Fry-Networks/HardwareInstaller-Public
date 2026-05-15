@@ -473,6 +473,9 @@ def _load_build_config() -> Dict[str, Any]:
                         if bearer_token:
                             config['external_api']['bearer_token'] = bearer_token
                             return config
+                    # Frozen build with embedded config but no bearer_token — critical auth failure
+                    if getattr(sys, 'frozen', False):
+                        _logger.critical("Frozen build has no external_api.bearer_token; API calls will be unauthenticated.")
         else:
             if debug:
                 print(f"[DEBUG] Config file NOT found at: {config_file}")

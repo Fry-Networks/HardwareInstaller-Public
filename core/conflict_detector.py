@@ -18,7 +18,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+
+import uuid
+import base64
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from .key_parser import MinerKeyParser
 from . import naming
@@ -62,12 +68,107 @@ class ConflictDetector:
         self.use_test = use_test
     
     def _get_install_id(self) -> str:
-        """Get or create install_id for this installation."""
-        # REMOVED: Reading/writing plaintext install_id.txt
-        # Only encrypted files are used for security
-        import uuid
+        """Generate a fresh install_id as last-resort fallback."""
         return str(uuid.uuid4())
-    
+
+    def _load_install_id_for_miner(self, miner_code: str) -> Optional[str]:
+        """Read persisted install_id from disk for the given miner code."""
+        if self.platform.startswith('win'):
+            base_dirs = [
+                Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "FryNetworks",
+                Path.home() / "AppData" / "Local" / "FryNetworks"
+            ]
+        else:
+            base_dirs = [
+                Path("/var/lib/frynetworks"),
+                Path.home() / ".local" / "share" / "frynetworks"
+            ]
+
+        miner_dir_name = f"miner-{miner_code.lower()}"
+        for base_dir in base_dirs:
+            miner_dir = base_dir / miner_dir_name
+            if not miner_dir.exists():
+                continue
+
+            # 1. Try encrypted config/install_config.enc
+            enc_path = miner_dir / "config" / "install_config.enc"
+            if enc_path.exists():
+                try:
+                    with open(enc_path, "r", encoding="utf-8") as f:
+                        wrapper = json.load(f)
+                    encrypted_data = wrapper.get("data", "")
+                    if encrypted_data:
+                        salt = b'install_config_salt_v1'
+                        kdf = PBKDF2HMAC(
+                            algorithm=hashes.SHA256(),
+                            length=32,
+                            salt=salt,
+                            iterations=100000,
+                        )
+                        password = "install_config_encryption_key_v1".encode()
+                        key = base64.urlsafe_b64encode(kdf.derive(password))
+                        fernet = Fernet(key)
+                        decrypted = fernet.decrypt(encrypted_data.encode())
+                        config_data = json.loads(decrypted)
+                        install_id = config_data.get("install_id")
+                        if install_id:
+                            uuid.UUID(str(install_id))
+                            return str(install_id)
+                except Exception as e:
+                    print(f"⚠ ConflictDetector encrypted config read failed: {e}")
+
+            # 2. Plaintext config/installer_config.json — REFUSED for security
+            cfg_path = miner_dir / "config" / "installer_config.json"
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    install_id = cfg.get("install_id")
+                    if isinstance(install_id, str) and install_id.strip():
+                        uuid.UUID(install_id.strip())
+                        print(f"⚠ Security warning: plaintext install_id found for {miner_code} but will not be trusted. Falling back to legacy paths.")
+                        # Do NOT return — continue to legacy fallback
+                except Exception as e:
+                    print(f"⚠ ConflictDetector plaintext config read failed: {e}")
+
+            # 3. Legacy fallback: root-level files
+            for legacy_name in ("install_config.enc", "installer_config.json"):
+                legacy_path = miner_dir / legacy_name
+                if legacy_path.exists():
+                    try:
+                        if legacy_name.endswith(".enc"):
+                            with open(legacy_path, "r", encoding="utf-8") as f:
+                                wrapper = json.load(f)
+                            encrypted_data = wrapper.get("data", "")
+                            if encrypted_data:
+                                salt = b'install_config_salt_v1'
+                                kdf = PBKDF2HMAC(
+                                    algorithm=hashes.SHA256(),
+                                    length=32,
+                                    salt=salt,
+                                    iterations=100000,
+                                )
+                                password = "install_config_encryption_key_v1".encode()
+                                key = base64.urlsafe_b64encode(kdf.derive(password))
+                                fernet = Fernet(key)
+                                decrypted = fernet.decrypt(encrypted_data.encode())
+                                config_data = json.loads(decrypted)
+                                install_id = config_data.get("install_id")
+                                if install_id:
+                                    uuid.UUID(str(install_id))
+                                    return str(install_id)
+                        else:
+                            with open(legacy_path, "r", encoding="utf-8") as f:
+                                cfg = json.load(f)
+                            install_id = cfg.get("install_id")
+                            if isinstance(install_id, str) and install_id.strip():
+                                uuid.UUID(install_id.strip())
+                                return install_id.strip()
+                    except Exception as e:
+                        print(f"⚠ ConflictDetector legacy config read failed ({legacy_name}): {e}")
+
+        return None
+
     def check_device_conflicts(self, new_key: str) -> Dict[str, Any]:
         """
         Check for conflicts on this device.
@@ -237,7 +338,9 @@ class ConflictDetector:
                     })
             
             # Global instance check via External API
-            install_id = self._get_install_id()
+            install_id = self._load_install_id_for_miner(new_miner.get("code", ""))
+            if not install_id:
+                install_id = self._get_install_id()
             has_other_active = self.api_client.has_other_active_installation(new_key, install_id)
             if has_other_active:
                 conflicts["active_instance"] = True
@@ -338,9 +441,9 @@ class ConflictDetector:
                 _cd_logger.error(f"ERROR checking limits for {new_miner.get('code')}: {error_msg}")
                 _cd_logger.error(f"Traceback: {traceback.format_exc()}")
 
-                # Block if this miner type has an IP limit configured (not just BM)
+                # Block only if this miner type has an IP limit configured
                 # If we know a limit was set but failed to check, block to be safe
-                should_block = ip_limit is not None or new_miner.get("code") == "BM"
+                should_block = ip_limit is not None
                 if should_block:
                     _cd_logger.warning(f"Blocking {new_miner.get('code')} due to IP check failure (ip_limit={ip_limit})")
                     conflicts["has_conflicts"] = True
@@ -392,7 +495,7 @@ class ConflictDetector:
             sys_lower = sys_name.lower()
 
             vm_markers = [
-                "virtual", "vmware", "hyper-v", "xen", "qemu", "kvm",
+                "vmware", "hyper-v", "xen", "qemu", "kvm",
                 "parallels", "virtualbox", "vbox", "bochs"
             ]
 
