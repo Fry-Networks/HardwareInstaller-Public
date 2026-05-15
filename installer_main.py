@@ -378,7 +378,7 @@ def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, wi
     wrapper_dir.mkdir(parents=True, exist_ok=True)
     wrapper_path = wrapper_dir / "fryhub-launch-update.ps1"
 
-    ps_script = textwrap.dedent("""\
+    ps_script = textwrap.dedent(r"""\
     param(
         [int]$HubPid,
         [int]$BootloaderPid,
