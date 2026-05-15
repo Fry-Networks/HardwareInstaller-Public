@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import uuid
 import socket
+import platform
 import time
+from datetime import datetime, timezone
 
 from .key_parser import MinerKeyParser
 from . import naming
@@ -803,7 +805,9 @@ class WindowsServiceManager:
                 json.dump(encrypted_config, cf)
 
             # Write plaintext installer_config.json — read-merge-write to preserve
-            # existing fields (miner_code, poc_version) needed by updater PoC discovery
+            # existing fields (miner_code, poc_version) needed by updater PoC discovery.
+            # SECURITY: install_id is NEVER written to plaintext; any existing install_id
+            # in the plaintext file is explicitly scrubbed.
             try:
                 cfg_path = config_dir / "installer_config.json"
                 existing_cfg = {}
@@ -814,8 +818,9 @@ class WindowsServiceManager:
                         raise RuntimeError(
                             f"installer_config.json is malformed at {cfg_path}: {e}"
                         )
+                # Scrub any pre-existing install_id so it cannot survive via merge
+                existing_cfg.pop("install_id", None)
                 new_fields = {
-                    "install_id": install_id,
                     "installer_version": installer_version,
                     "version_platform": version_platform or "",
                     "created_at": config_data.get("created_at"),
@@ -1279,7 +1284,7 @@ class WindowsServiceManager:
 
                             result.setdefault('actions', []).append(f"Detected external IP: {external_ip} (limit: {ip_limit})")
                     except Exception as e:
-                        if ip_limit is not None or self.miner_code == "BM":
+                        if ip_limit is not None:
                             result['message'] = f"Cannot validate IP availability: {e}. Please check your internet connection and try again."
                             result['success'] = False
                             return result
@@ -1383,6 +1388,25 @@ class WindowsServiceManager:
                         start_res = self.start_service()
                         if start_res.get("success"):
                             result["actions"].append("Started service")
+                            # --- Dashboard heartbeat (status sync) ---
+                            try:
+                                if client and miner_key and install_id:
+                                    heartbeat_payload = {
+                                        "hostname": socket.gethostname(),
+                                        "is_installed": True,
+                                        "ip_detected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                        "os": platform.platform(),
+                                    }
+                                    if external_ip:
+                                        heartbeat_payload["external_ip"] = external_ip
+                                    if poc_version:
+                                        heartbeat_payload["poc_version_installed"] = poc_version
+                                    if gui_version:
+                                        heartbeat_payload["software_version_installed"] = gui_version
+                                    client.upsert_installation(miner_key, install_id, heartbeat_payload)
+                                    result.setdefault("actions", []).append("Dashboard status synced")
+                            except Exception as hb_err:
+                                result.setdefault("api_errors", []).append(f"Dashboard sync failed: {hb_err}")
                         else:
                             result.setdefault("warnings", []).append(f"Service start failed: {start_res.get('message')}")
                     except Exception as e:
@@ -2120,8 +2144,8 @@ class WindowsServiceManager:
             poc_target_check = self.base_dir / poc_filename_check
 
             if gui_target.exists() and poc_target_check.exists():
-                print(f"[info] Both GUI and PoC already exist: {gui_filename}, {poc_filename_check}")
-                return True, attempts, self.version, self.version
+                print(f"[info] Both GUI and PoC already exist for local version: {gui_filename}, {poc_filename_check}")
+                print(f"[info] Proceeding to verify API-required version and service registration")
             elif gui_target.exists():
                 print(f"[info] GUI exists but PoC is missing - will download PoC")
             elif poc_target_check.exists():
@@ -2523,8 +2547,113 @@ class WindowsServiceManager:
             return False, locals().get('attempts', []), None, None
     
     def _load_existing_install_id(self) -> Optional[str]:
-        # REMOVED: Reading from plaintext files (install_id.txt, installer_config.json)
-        # Only encrypted files are used for security
+        """Read install_id from persisted config files (encrypted preferred, plaintext fallback)."""
+        config_dir = self.base_dir / "config"
+
+        # 1. Try encrypted config/install_config.enc
+        enc_path = config_dir / "install_config.enc"
+        if enc_path.exists():
+            try:
+                with open(enc_path, "r", encoding="utf-8") as f:
+                    wrapper = json.load(f)
+                encrypted_data = wrapper.get("data", "")
+                if encrypted_data:
+                    salt = b'install_config_salt_v1'
+                    kdf = PBKDF2HMAC(
+                        algorithm=hashes.SHA256(),
+                        length=32,
+                        salt=salt,
+                        iterations=100000,
+                    )
+                    password = "install_config_encryption_key_v1".encode()
+                    key = base64.urlsafe_b64encode(kdf.derive(password))
+                    fernet = Fernet(key)
+                    decrypted = fernet.decrypt(encrypted_data.encode())
+                    config_data = json.loads(decrypted)
+                    install_id = config_data.get("install_id")
+                    if install_id:
+                        # Validate UUID format
+                        uuid.UUID(str(install_id))
+                        return str(install_id)
+            except Exception as e:
+                print(f"⚠ Encrypted install config read failed: {e}")
+
+        # 2. Fallback: plaintext config/installer_config.json — migrate valid id then scrub
+        cfg_path = config_dir / "installer_config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                install_id = cfg.get("install_id")
+                if isinstance(install_id, str) and install_id.strip():
+                    uuid.UUID(install_id.strip())
+                    install_id = install_id.strip()
+                    # Migrate to encrypted storage immediately
+                    salt = b'install_config_salt_v1'
+                    kdf = PBKDF2HMAC(
+                        algorithm=hashes.SHA256(),
+                        length=32,
+                        salt=salt,
+                        iterations=100000,
+                    )
+                    password = "install_config_encryption_key_v1".encode()
+                    key = base64.urlsafe_b64encode(kdf.derive(password))
+                    fernet = Fernet(key)
+                    encrypted_config = {
+                        "data": fernet.encrypt(json.dumps({"install_id": install_id}).encode()).decode(),
+                        "version": "1.0"
+                    }
+                    enc_path = config_dir / "install_config.enc"
+                    with open(enc_path, "w", encoding="utf-8") as ef:
+                        json.dump(encrypted_config, ef)
+                    # Scrub install_id from plaintext so it is no longer honored
+                    cfg.pop("install_id", None)
+                    tmp_path = cfg_path.with_suffix(".json.tmp")
+                    tmp_path.write_text(
+                        json.dumps(cfg, indent=2) + "\n", encoding="utf-8"
+                    )
+                    os.replace(str(tmp_path), str(cfg_path))
+                    print(f"⚠ Migrated install_id from plaintext to encrypted storage. Plaintext fallback will be removed in a future release.")
+                    return install_id
+            except Exception as e:
+                print(f"⚠ Plaintext installer config read failed: {e}")
+
+        # 3. Legacy fallback: root-level files
+        for legacy_name in ("install_config.enc", "installer_config.json"):
+            legacy_path = self.base_dir / legacy_name
+            if legacy_path.exists():
+                try:
+                    if legacy_name.endswith(".enc"):
+                        with open(legacy_path, "r", encoding="utf-8") as f:
+                            wrapper = json.load(f)
+                        encrypted_data = wrapper.get("data", "")
+                        if encrypted_data:
+                            salt = b'install_config_salt_v1'
+                            kdf = PBKDF2HMAC(
+                                algorithm=hashes.SHA256(),
+                                length=32,
+                                salt=salt,
+                                iterations=100000,
+                            )
+                            password = "install_config_encryption_key_v1".encode()
+                            key = base64.urlsafe_b64encode(kdf.derive(password))
+                            fernet = Fernet(key)
+                            decrypted = fernet.decrypt(encrypted_data.encode())
+                            config_data = json.loads(decrypted)
+                            install_id = config_data.get("install_id")
+                            if install_id:
+                                uuid.UUID(str(install_id))
+                                return str(install_id)
+                    else:
+                        with open(legacy_path, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                        install_id = cfg.get("install_id")
+                        if isinstance(install_id, str) and install_id.strip():
+                            uuid.UUID(install_id.strip())
+                            return install_id.strip()
+                except Exception as e:
+                    print(f"⚠ Legacy config read failed ({legacy_name}): {e}")
+
         return None
 
     def _ensure_install_id(self, options: Optional[dict]) -> str:
@@ -3070,7 +3199,7 @@ class LinuxServiceManager:
 
                             result.setdefault('actions', []).append(f"Detected external IP: {external_ip} (limit: {ip_limit})")
                     except Exception as e:
-                        if ip_limit is not None or self.miner_code == "BM":
+                        if ip_limit is not None:
                             result['message'] = f"Cannot validate IP availability: {e}. Please check your internet connection and try again."
                             result['success'] = False
                             return result
@@ -3189,6 +3318,25 @@ class LinuxServiceManager:
                         start_res = self.start_service()
                         if start_res.get("success"):
                             result["actions"].append("Started service")
+                            # --- Dashboard heartbeat (status sync) ---
+                            try:
+                                if client and miner_key and install_id:
+                                    heartbeat_payload = {
+                                        "hostname": socket.gethostname(),
+                                        "is_installed": True,
+                                        "ip_detected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                        "os": platform.platform(),
+                                    }
+                                    if external_ip:
+                                        heartbeat_payload["external_ip"] = external_ip
+                                    if poc_version:
+                                        heartbeat_payload["poc_version_installed"] = poc_version
+                                    if gui_version:
+                                        heartbeat_payload["software_version_installed"] = gui_version
+                                    client.upsert_installation(miner_key, install_id, heartbeat_payload)
+                                    result.setdefault("actions", []).append("Dashboard status synced")
+                            except Exception as hb_err:
+                                result.setdefault("api_errors", []).append(f"Dashboard sync failed: {hb_err}")
                         else:
                             result.setdefault("warnings", []).append(f"Service start failed: {start_res.get('message')}")
                     except Exception as e:
@@ -3889,8 +4037,113 @@ class LinuxServiceManager:
             return False, locals().get('attempts', []), None, None
     
     def _load_existing_install_id(self) -> Optional[str]:
-        # REMOVED: Reading from plaintext files (install_id.txt, installer_config.json)
-        # Only encrypted files are used for security
+        """Read install_id from persisted config files (encrypted preferred, plaintext fallback)."""
+        config_dir = self.base_dir / "config"
+
+        # 1. Try encrypted config/install_config.enc
+        enc_path = config_dir / "install_config.enc"
+        if enc_path.exists():
+            try:
+                with open(enc_path, "r", encoding="utf-8") as f:
+                    wrapper = json.load(f)
+                encrypted_data = wrapper.get("data", "")
+                if encrypted_data:
+                    salt = b'install_config_salt_v1'
+                    kdf = PBKDF2HMAC(
+                        algorithm=hashes.SHA256(),
+                        length=32,
+                        salt=salt,
+                        iterations=100000,
+                    )
+                    password = "install_config_encryption_key_v1".encode()
+                    key = base64.urlsafe_b64encode(kdf.derive(password))
+                    fernet = Fernet(key)
+                    decrypted = fernet.decrypt(encrypted_data.encode())
+                    config_data = json.loads(decrypted)
+                    install_id = config_data.get("install_id")
+                    if install_id:
+                        # Validate UUID format
+                        uuid.UUID(str(install_id))
+                        return str(install_id)
+            except Exception as e:
+                print(f"⚠ Encrypted install config read failed: {e}")
+
+        # 2. Fallback: plaintext config/installer_config.json — migrate valid id then scrub
+        cfg_path = config_dir / "installer_config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                install_id = cfg.get("install_id")
+                if isinstance(install_id, str) and install_id.strip():
+                    uuid.UUID(install_id.strip())
+                    install_id = install_id.strip()
+                    # Migrate to encrypted storage immediately
+                    salt = b'install_config_salt_v1'
+                    kdf = PBKDF2HMAC(
+                        algorithm=hashes.SHA256(),
+                        length=32,
+                        salt=salt,
+                        iterations=100000,
+                    )
+                    password = "install_config_encryption_key_v1".encode()
+                    key = base64.urlsafe_b64encode(kdf.derive(password))
+                    fernet = Fernet(key)
+                    encrypted_config = {
+                        "data": fernet.encrypt(json.dumps({"install_id": install_id}).encode()).decode(),
+                        "version": "1.0"
+                    }
+                    enc_path = config_dir / "install_config.enc"
+                    with open(enc_path, "w", encoding="utf-8") as ef:
+                        json.dump(encrypted_config, ef)
+                    # Scrub install_id from plaintext so it is no longer honored
+                    cfg.pop("install_id", None)
+                    tmp_path = cfg_path.with_suffix(".json.tmp")
+                    tmp_path.write_text(
+                        json.dumps(cfg, indent=2) + "\n", encoding="utf-8"
+                    )
+                    os.replace(str(tmp_path), str(cfg_path))
+                    print(f"⚠ Migrated install_id from plaintext to encrypted storage. Plaintext fallback will be removed in a future release.")
+                    return install_id
+            except Exception as e:
+                print(f"⚠ Plaintext installer config read failed: {e}")
+
+        # 3. Legacy fallback: root-level files
+        for legacy_name in ("install_config.enc", "installer_config.json"):
+            legacy_path = self.base_dir / legacy_name
+            if legacy_path.exists():
+                try:
+                    if legacy_name.endswith(".enc"):
+                        with open(legacy_path, "r", encoding="utf-8") as f:
+                            wrapper = json.load(f)
+                        encrypted_data = wrapper.get("data", "")
+                        if encrypted_data:
+                            salt = b'install_config_salt_v1'
+                            kdf = PBKDF2HMAC(
+                                algorithm=hashes.SHA256(),
+                                length=32,
+                                salt=salt,
+                                iterations=100000,
+                            )
+                            password = "install_config_encryption_key_v1".encode()
+                            key = base64.urlsafe_b64encode(kdf.derive(password))
+                            fernet = Fernet(key)
+                            decrypted = fernet.decrypt(encrypted_data.encode())
+                            config_data = json.loads(decrypted)
+                            install_id = config_data.get("install_id")
+                            if install_id:
+                                uuid.UUID(str(install_id))
+                                return str(install_id)
+                    else:
+                        with open(legacy_path, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                        install_id = cfg.get("install_id")
+                        if isinstance(install_id, str) and install_id.strip():
+                            uuid.UUID(install_id.strip())
+                            return install_id.strip()
+                except Exception as e:
+                    print(f"⚠ Legacy config read failed ({legacy_name}): {e}")
+
         return None
 
     def _ensure_install_id(self, options: Optional[dict]) -> str:
