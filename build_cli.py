@@ -51,12 +51,14 @@ def get_current_version(platform: Optional[str] = None):
 
 
 def parse_version(version_str):
-    """Parse version string into major, minor, patch."""
+    """Parse version string into major, minor, patch.
+    Accepts 3-part (MAJOR.MINOR.PATCH) or 4-part (MAJOR.MINOR.PATCH.BUILD)
+    format; extra parts beyond the third are ignored for bump logic."""
     parts = version_str.split('.')
-    if len(parts) != 3:
-        raise ValueError(f"Invalid version format: {version_str}. Expected MAJOR.MINOR.PATCH")
+    if len(parts) < 3:
+        raise ValueError(f"Invalid version format: {version_str}. Expected at least MAJOR.MINOR.PATCH")
     try:
-        return tuple(int(p) for p in parts)
+        return tuple(int(p) for p in parts[:3])
     except ValueError:
         raise ValueError(f"Invalid version format: {version_str}. All parts must be integers")
 
