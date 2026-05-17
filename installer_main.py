@@ -34,6 +34,18 @@ from typing import Dict, Any, Optional
 _logger = logging.getLogger(__name__)
 _logger.addHandler(logging.NullHandler())
 
+# Force UTF-8 for stdout/stderr so redirected CLI output survives on Windows
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure bundled modules (core/, gui/) are importable both from source and PyInstaller onefile
 _here = Path(__file__).parent
 if getattr(sys, "frozen", False):
@@ -553,6 +565,7 @@ def _threaded_download_and_launch(
 
 def main():
     """Main entry point for the installer."""
+    from version import WINDOWS_VERSION
     # Load environment variables
     load_env()
 
@@ -586,7 +599,7 @@ Examples:
     # Global options
     parser.add_argument('--gui', action='store_true',
                        help='Launch graphical installer interface')
-    parser.add_argument('--version', action='version', version='Fry Hub 1.0.0')
+    parser.add_argument('--version', action='version', version=f'Fry Hub {WINDOWS_VERSION}')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose output')
     parser.add_argument('--quiet', action='store_true',
@@ -1233,9 +1246,9 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
         # Detect external IP for all miners (used for lease and device distribution tracking)
         try:
             external_ip = get_external_ip()
-            print(f"🌐 Detected external IP: {external_ip}")
+            print(f"[NET] Detected external IP: {external_ip}")
         except Exception as e:
-            print(f"⚠ Could not detect external IP: {e}")
+            print(f"[WARN] Could not detect external IP: {e}")
 
         # Check if this miner type has IP enforcement enabled
         if miner_code:
@@ -1321,7 +1334,7 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
         active = lease_status.get("active", False)
         holder_install_id = lease_status.get("holder_install_id")
 
-        print(f"🔍 Checking lease status for {miner_key}...")
+        print(f"[SCAN] Checking lease status for {miner_key}...")
 
         if active and holder_install_id and holder_install_id != install_id:
             # Another device holds an active lease
@@ -1335,17 +1348,17 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
 
         elif not active and holder_install_id and holder_install_id != install_id:
             # Another device holds lease but it's inactive - can be taken over
-            print(f"⚠ Found inactive lease held by {holder_install_id}")
-            print("🔄 Lease is available for takeover (device migration)")
+            print(f"[WARN] Found inactive lease held by {holder_install_id}")
+            print("[SWAP] Lease is available for takeover (device migration)")
 
         # Try to acquire the lease
-        print(f"🔐 Acquiring lease for {miner_key}...")
+        print(f"[LOCK] Acquiring lease for {miner_key}...")
         lease_result = api_client.acquire_installation_lease(miner_key, install_id, lease_seconds=3600, external_ip=external_ip)
         lease_granted = lease_result.get("granted", False) if isinstance(lease_result, dict) else bool(lease_result)
         error_code = lease_result.get("error_code") if isinstance(lease_result, dict) else None
 
         if lease_granted:
-            print(f"✅ Lease acquired successfully")
+            print(f"[OK] Lease acquired successfully")
             return {
                 "success": True,
                 "message": "Lease acquired - installation can proceed",
@@ -1397,7 +1410,7 @@ def install_miner(args):
 
     # Check for conflicts with External API
     api_client = get_external_api_client()
-    print(f"✓ External API connected: {api_client.base_url}")
+    print(f"[OK] External API connected: {api_client.base_url}")
     
     detector = ConflictDetector(api_client=api_client)
     conflicts = detector.check_device_conflicts(args.key)
@@ -1424,28 +1437,28 @@ def install_miner(args):
     
     # Acquire lease for the miner key
     install_id = _get_install_id()
-    print(f"\\n🔐 Lease Acquisition Phase")
+    print(f"\\n[LOCK] Lease Acquisition Phase")
     print(f"Install ID: {install_id}")
     
     lease_result = acquire_miner_lease(api_client, args.key, install_id, miner_code=key_info["code"])
     
     if not lease_result["success"]:
-        print(f"\\n❌ Lease acquisition failed:")
+        print(f"\\n[FAIL] Lease acquisition failed:")
         print(f"  Error: {lease_result['message']}")
         
         if lease_result.get("resolution"):
             print(f"  Solution: {lease_result['resolution']}")
         
         if lease_result.get("error") == "active_lease_held":
-            print(f"\\n📱 Another device is actively using this miner key.")
+            print(f"\\n[DEV] Another device is actively using this miner key.")
             print(f"   Holder: {lease_result.get('holder_install_id', 'Unknown')}")
             print(f"   Action: Stop the miner on the other device first.")
         
         return 1
     
-    print(f"\\n✅ {lease_result['message']}")
+    print(f"\\n[OK] {lease_result['message']}")
     if lease_result.get("takeover"):
-        print("🔄 This installation will take over from an inactive device")
+        print("[SWAP] This installation will take over from an inactive device")
     
     # Setup configuration
     config_manager = ConfigManager(key_info["code"])
@@ -1495,7 +1508,7 @@ def install_miner(args):
     )
 
     if install_result["success"]:
-        print(f"✓ {install_result['message']}")
+        print(f"[OK] {install_result['message']}")
         for action in install_result.get("actions", []):
             print(f"  • {action}")
 
@@ -1518,7 +1531,7 @@ def install_miner(args):
                 nssm_path = base_dir / "nssm.exe"
 
                 if not nssm_path.exists():
-                    print("✗ MystNodes SDK provisioning skipped — nssm.exe missing")
+                    print("[FAIL] MystNodes SDK provisioning skipped — nssm.exe missing")
                     return 1
 
                 # Legacy Mysterium teardown (Fix #2b) — must run before SDK provisioning
@@ -1529,10 +1542,10 @@ def install_miner(args):
                     progress_callback=lambda msg: print(f"  {msg}"),
                 )
                 if upgrade_result.failed:
-                    print(f"✗ Legacy Mysterium upgrade failed: {upgrade_result.error}")
+                    print(f"[FAIL] Legacy Mysterium upgrade failed: {upgrade_result.error}")
                     return 1
                 if upgrade_result.upgrade_performed:
-                    print("✓ Legacy Mysterium teardown complete")
+                    print("[OK] Legacy Mysterium teardown complete")
 
                 print("→ Provisioning MystNodes SDK Client...")
                 result = provision_mystnodes_sdk_at_install(
@@ -1541,14 +1554,14 @@ def install_miner(args):
                     progress_callback=lambda label, status: print(f"  [{label}] {status}"),
                 )
                 if not result.success:
-                    print(f"✗ MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
+                    print(f"[FAIL] MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
                     cleanup_mystnodes_sdk_on_failure(base_dir, nssm_path)
                     return 1
-                print("✓ MystNodes SDK provisioning complete")
+                print("[OK] MystNodes SDK provisioning complete")
 
         return 0
     else:
-        print(f"✗ {install_result['message']}")
+        print(f"[FAIL] {install_result['message']}")
         return 1
 
 
@@ -1562,10 +1575,10 @@ def handle_validate(args):
     result = parser.parse_miner_key(args.key)
     
     if not result["valid"]:
-        print(f"✗ Invalid key format: {result['error']}")
+        print(f"[FAIL] Invalid key format: {result['error']}")
         return 1
     
-    print(f"✓ Valid {result['name']} key format")
+    print(f"[OK] Valid {result['name']} key format")
     print(f"  Code: {result['code']}")
     print(f"  Group: {result['group']}")
     if result["exclusive"]:
@@ -1575,11 +1588,11 @@ def handle_validate(args):
     try:
         api_client = get_external_api_client()
         
-        print(f"\\n🔍 Validating with External API...")
+        print(f"\\n[SCAN] Validating with External API...")
         miner_profile = api_client.get_miner_profile(args.key)
         
         if miner_profile.get("exists", False):
-            print(f"✓ Miner key exists in system")
+            print(f"[OK] Miner key exists in system")
             
             # Show additional profile info if available
             if miner_profile.get("registered_mac"):
@@ -1588,34 +1601,34 @@ def handle_validate(args):
                 print(f"  Hex ID: {miner_profile['hex_id']}")
                 
         else:
-            print(f"✗ Miner key does not exist in system")
+            print(f"[FAIL] Miner key does not exist in system")
             print("  Contact support or verify the key is correct")
             return 1
             
     except Exception as e:
-        print(f"✗ External API validation failed: {e}")
+        print(f"[FAIL] External API validation failed: {e}")
         print("  Check network connection and API availability")
         return 1
     
     # Check conflicts if requested
     if args.check_conflicts:
-        print("\\n🔍 Checking for conflicts...")
+        print("\\n[SCAN] Checking for conflicts...")
         try:
             detector = ConflictDetector(api_client)
             conflicts = detector.check_device_conflicts(args.key)
             
             if conflicts.get("error"):
-                print(f"✗ Validation error: {conflicts['error']}")
+                print(f"[FAIL] Validation error: {conflicts['error']}")
                 return 1
             elif conflicts.get("has_conflicts"):
-                print("⚠ Conflicts detected:")
+                print("[WARN] Conflicts detected:")
                 for detail in conflicts["details"]:
-                    severity_icon = "🔥" if detail["severity"] == "error" else "⚠"
+                    severity_icon = "[ERR]" if detail["severity"] == "error" else "[WARN]"
                     print(f"  {severity_icon} {detail['message']}")
             else:
-                print("✓ No conflicts detected - ready for installation")
+                print("[OK] No conflicts detected - ready for installation")
         except Exception as e:
-            print(f"✗ Conflict check failed: {e}")
+            print(f"[FAIL] Conflict check failed: {e}")
             return 1
     
     return 0
@@ -1652,19 +1665,19 @@ def handle_service(args):
         
     elif args.action == "start":
         result = service_manager.start_service()
-        print(f"{'✓' if result['success'] else '✗'} {result['message']}")
+        print(f"{'[OK]' if result['success'] else '[FAIL]'} {result['message']}")
         
     elif args.action == "stop":
         result = service_manager.stop_service()
-        print(f"{'✓' if result['success'] else '✗'} {result['message']}")
+        print(f"{'[OK]' if result['success'] else '[FAIL]'} {result['message']}")
         
     elif args.action == "restart":
         stop_result = service_manager.stop_service()
         if stop_result["success"]:
             start_result = service_manager.start_service()
-            print(f"{'✓' if start_result['success'] else '✗'} Service restarted")
+            print(f"{'[OK]' if start_result['success'] else '[FAIL]'} Service restarted")
         else:
-            print(f"✗ Failed to stop service: {stop_result['message']}")
+            print(f"[FAIL] Failed to stop service: {stop_result['message']}")
             
     elif args.action == "logs":
         logs = service_manager.get_service_logs(args.lines)
@@ -1686,19 +1699,19 @@ def _uninstall_single(miner_code: str, system_wide: bool, remove_data: bool):
     service_manager = ServiceManager(miner_code)
     result = service_manager.uninstall_service()
     if result["success"]:
-        print(f"✓ {result['message']}")
+        print(f"[OK] {result['message']}")
         for action in result.get("actions", []):
             print(f"  • {action}")
     else:
-        print(f"⚠ Service removal: {result['message']}")
+        print(f"[WARN] Service removal: {result['message']}")
 
     if remove_data:
         config_manager = ConfigManager(miner_code)
         config_result = config_manager.remove_configuration(system_wide)
         if config_result["success"]:
-            print("✓ Configuration and data removed")
+            print("[OK] Configuration and data removed")
         else:
-            print(f"⚠ Configuration removal failed: {config_result['errors']}")
+            print(f"[WARN] Configuration removal failed: {config_result['errors']}")
 
 
 def _remove_updater_task():
@@ -1710,7 +1723,7 @@ def _remove_updater_task():
         capture_output=True, text=True
     )
     if result.returncode == 0:
-        print("✓ FryNetworksUpdater scheduled task removed")
+        print("[OK] FryNetworksUpdater scheduled task removed")
     else:
         print("  (FryNetworksUpdater task not found or already removed)")
 
@@ -1726,9 +1739,9 @@ def _remove_hub_data_root():
     if root.exists():
         try:
             shutil.rmtree(root)
-            print(f"✓ Removed {root}")
+            print(f"[OK] Removed {root}")
         except Exception as exc:
-            print(f"⚠ Could not remove {root}: {exc}")
+            print(f"[WARN] Could not remove {root}: {exc}")
 
 
 def handle_uninstall(args):
@@ -1759,7 +1772,7 @@ def handle_uninstall(args):
             try:
                 _uninstall_single(code, sw, args.remove_data)
             except Exception as e:
-                print(f"⚠ Failed to uninstall {code}: {e}")
+                print(f"[WARN] Failed to uninstall {code}: {e}")
                 failures.append((code, str(e)))
 
         # Scheduled task removal AFTER all miners
@@ -1770,7 +1783,7 @@ def handle_uninstall(args):
             _remove_hub_data_root()
 
         if failures:
-            print(f"\n⚠ {len(failures)} miner(s) failed to uninstall:")
+            print(f"\n[WARN] {len(failures)} miner(s) failed to uninstall:")
             for code, err in failures:
                 print(f"  • {code}: {err}")
             return 1
