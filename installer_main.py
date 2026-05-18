@@ -1115,6 +1115,9 @@ def launch_gui(args):
         # here ensures the splash dismisses as soon as the window is on screen.
         if _qt_splash is not None:
             try:
+                # Aggressive hide first; finish()/close() are sometimes no-op on
+                # Windows if the native window is not yet fully mapped (#race).
+                _qt_splash.hide()
                 _qt_splash.finish(window)
                 # Single processEvents() call to ensure paint completes before we continue
                 app.processEvents()

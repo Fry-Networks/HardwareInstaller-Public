@@ -33,7 +33,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     $VersionFile = Join-Path $PSScriptRoot "version.py"
     if (Test-Path $VersionFile) {
         $VersionContent = Get-Content $VersionFile -Raw
-        if ($VersionContent -match '__version__\s*=\s*["' + "'" + ']([^"' + "'" + ']+)["' + "'" + ']') {
+        if ($VersionContent -match 'WINDOWS_VERSION\s*=\s*["' + "'" + ']([^"' + "'" + ']+)["' + "'" + ']') {
             $Version = $matches[1]
             Write-Host "  [OK] Version from version.py: $Version" -ForegroundColor Green
         } else {
@@ -228,6 +228,50 @@ try {
     exit 1
 }
 
+# Regenerate version_info.txt so the binary embeds correct metadata
+$VersionParts = $Version -split '\.' | ForEach-Object { [int]$_ }
+while ($VersionParts.Length -lt 4) { $VersionParts += 0 }
+$VersionTuple = ($VersionParts[0..3] -join ', ')
+$VersionInfoPath = Join-Path $PSScriptRoot "resources\version_info.txt"
+@"
+# UTF-8
+#
+# For more details about fixed file info see:
+# http://msdn.microsoft.com/en-us/library/ms646997.aspx
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=($VersionTuple),
+    prodvers=($VersionTuple),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'040904B0',
+          [
+            StringStruct(u'CompanyName', u'Fry Networks'),
+            StringStruct(u'FileDescription', u'Fry Hub'),
+            StringStruct(u'FileVersion', u'$Version'),
+            StringStruct(u'InternalName', u'frynetworks_installer'),
+            StringStruct(u'OriginalFilename', u'frynetworks_installer.exe'),
+            StringStruct(u'ProductName', u'Fry Hub'),
+            StringStruct(u'ProductVersion', u'$Version'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+"@ | Out-File -FilePath $VersionInfoPath -Encoding utf8 -Force
+Write-Host "  [OK] Regenerated resources\version_info.txt for $Version" -ForegroundColor Green
+
 Write-Host "`n[5b/5] Building installer with PyInstaller..." -ForegroundColor Yellow
 Write-Host "  This may take 30-60 seconds..." -ForegroundColor Gray
 $ExeName = "frynetworks_installer_v$Version"
@@ -252,10 +296,8 @@ try {
         --collect-submodules "core" `
         --icon "resources\fryhub.ico" `
         --version-file "resources\version_info.txt" `
-        --splash "resources\frynetworks_splash.png" `
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
-        --add-data "resources\frynetworks_splash.png;resources" `
         --add-data "resources\fryhub.ico;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
         --add-data "resources\embedded;resources\embedded" `
