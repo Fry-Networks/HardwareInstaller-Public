@@ -872,7 +872,7 @@ def _safe_pyi_splash(action):
     """
     try:
         import pyi_splash
-    except ImportError:
+    except Exception:
         return
     if not getattr(pyi_splash, '_initialized', False):
         return
