@@ -12,7 +12,9 @@ frynetworks_installer.exe, that is a security incident — flag immediately.
 """
 
 import hashlib
+import http.client
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,7 +36,8 @@ if getattr(sys, 'frozen', False):
 
 # --- Constants ---
 _STORAGE_ZONE = "frynetworks-downloads"
-_STORAGE_BASE = f"https://storage.bunnycdn.com/{_STORAGE_ZONE}"
+_STORAGE_HOSTNAME = "ny.storage.bunnycdn.com"
+_STORAGE_BASE = f"https://{_STORAGE_HOSTNAME}/{_STORAGE_ZONE}"
 _PULL_ZONE_BASE = "https://frynetworks-downloads.b-cdn.net"
 _PURGE_URL = "https://api.bunny.net/purge"
 _CDN_PREFIX = "frynetworks-installer"
@@ -76,6 +79,25 @@ def _resolve_access_key() -> str:
     if not key:
         raise RuntimeError(f"Empty value at {_OP_REF}")
     return key
+
+
+def _resolve_storage_password() -> str:
+    """Read Bunny Storage Zone Password from BUNNY_STORAGE_PASSWORD env var."""
+    pw = os.environ.get("BUNNY_STORAGE_PASSWORD")
+    if not pw:
+        raise RuntimeError(
+            "BUNNY_STORAGE_PASSWORD environment variable is required for storage operations. "
+            "It must contain the Storage Zone password (not the Account API Key)."
+        )
+    return pw
+
+
+def _resolve_account_key() -> str:
+    """Read Bunny Account API Key from BUNNY_ACCOUNT_API_KEY env var, or fall back to 1Password."""
+    key = os.environ.get("BUNNY_ACCOUNT_API_KEY")
+    if key:
+        return key
+    return _resolve_access_key()
 
 
 # --- SHA-256 ---
@@ -137,20 +159,29 @@ def _put(zone_path: str, data: bytes, content_type: str, access_key: str) -> Non
 
 
 def _head(zone_path: str, access_key: str) -> bool:
-    """HEAD-check whether a file exists at storage.bunnycdn.com/<zone>/<zone_path>."""
+    """Check whether a file exists at storage.bunnycdn.com/<zone>/<zone_path>.
+
+    Uses a GET request via http.client so we read only the status line
+    and headers, avoiding a full download. Bunny Storage returns 401
+    on HEAD even with a valid key; GET works correctly.
+    """
     url = _storage_url(zone_path)
-    req = urllib.request.Request(
-        url, method="HEAD",
-        headers={"AccessKey": access_key},
-    )
+    parsed = urllib.parse.urlparse(url)
+    conn = http.client.HTTPSConnection(parsed.netloc, timeout=10)
     try:
-        resp = urllib.request.urlopen(req, timeout=10)
-        resp.close()
-        return True
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        conn.request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""),
+                     headers={"AccessKey": access_key})
+        resp = conn.getresponse()
+        status = resp.status
+        conn.close()
+        if status == 200:
+            return True
+        if status == 404:
             return False
-        raise
+        raise RuntimeError(f"HTTP {status} at {url}")
+    except OSError as exc:
+        conn.close()
+        raise RuntimeError(f"Connection failed for {url}: {exc}") from exc
 
 
 def _purge(pull_zone_path: str, access_key: str) -> None:
@@ -189,13 +220,14 @@ def upload_hub(version: str, exe_path: Path, *, min_required: Optional[str] = No
     size = exe_path.stat().st_size
     print(f"[upload-hub] {exe_path.name} ({size:,} bytes, sha256={sha[:16]}...)")
 
-    # 2. Resolve credential (in-memory only)
-    key = _resolve_access_key()
+    # 2. Resolve credentials (in-memory only)
+    storage_pw = _resolve_storage_password()
+    account_key = _resolve_account_key()
 
     # 3. Idempotency check
     latest_path = f"{_CDN_PREFIX}/hub/latest/{exe_path.name}"
     archive_path = f"{_CDN_PREFIX}/hub/archive/{exe_path.name}"
-    if _head(latest_path, key) and not force:
+    if _head(latest_path, storage_pw) and not force:
         raise RuntimeError(
             f"{exe_path.name} already exists at /hub/latest/. "
             f"Pass --force to overwrite."
@@ -205,11 +237,11 @@ def upload_hub(version: str, exe_path: Path, *, min_required: Optional[str] = No
     data = exe_path.read_bytes()
 
     # 5. Upload to /hub/archive/ FIRST
-    _put(archive_path, data, "application/octet-stream", key)
+    _put(archive_path, data, "application/octet-stream", storage_pw)
     print(f"[upload-hub] uploaded archive: {archive_path}")
 
     # 6. Upload to /hub/latest/
-    _put(latest_path, data, "application/octet-stream", key)
+    _put(latest_path, data, "application/octet-stream", storage_pw)
     print(f"[upload-hub] uploaded latest: {latest_path}")
 
     # 7. Generate manifest
@@ -225,12 +257,12 @@ def upload_hub(version: str, exe_path: Path, *, min_required: Optional[str] = No
 
     # 8. Upload manifest LAST (atomic publish-point)
     manifest_path = f"{_CDN_PREFIX}/hub/latest/fryhub_version.json"
-    _put(manifest_path, manifest_bytes, "application/json", key)
+    _put(manifest_path, manifest_bytes, "application/json", storage_pw)
     print(f"[upload-hub] uploaded manifest: {manifest_path}")
 
     # 9. Purge pull-zone cache
-    _purge(latest_path, key)
-    _purge(manifest_path, key)
+    _purge(latest_path, account_key)
+    _purge(manifest_path, account_key)
     print("[upload-hub] purged CDN cache")
 
     print(f"[upload-hub] DONE — {exe_path.name} live at {_pullzone_url(latest_path)}")
@@ -250,13 +282,14 @@ def rollback_hub(target_version: str) -> None:
             f"{WINDOWS_VERSION}. Refusing to disguise an upgrade as a rollback."
         )
 
-    # 2. Resolve credential
-    key = _resolve_access_key()
+    # 2. Resolve credentials
+    storage_pw = _resolve_storage_password()
+    account_key = _resolve_account_key()
 
     # 3. Confirm archive exists
     archive_filename = f"FryHubSetup-{target_version}.exe"
     archive_zone_path = f"{_CDN_PREFIX}/hub/archive/{archive_filename}"
-    if not _head(archive_zone_path, key):
+    if not _head(archive_zone_path, storage_pw):
         raise FileNotFoundError(
             f"Archive does not exist: {_pullzone_url(archive_zone_path)}"
         )
@@ -291,11 +324,11 @@ def rollback_hub(target_version: str) -> None:
         manifest_path = f"{_CDN_PREFIX}/hub/latest/fryhub_version.json"
 
         # 7. Upload manifest
-        _put(manifest_path, manifest_bytes, "application/json", key)
+        _put(manifest_path, manifest_bytes, "application/json", storage_pw)
         print("[rollback-hub] manifest rewritten")
 
         # 8. Purge
-        _purge(manifest_path, key)
+        _purge(manifest_path, account_key)
         print("[rollback-hub] purged CDN cache")
 
         print(f"[rollback-hub] DONE — manifest now points at {target_version}")
