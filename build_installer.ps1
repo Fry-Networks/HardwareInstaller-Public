@@ -312,6 +312,7 @@ try {
         --exclude-module PySide6.QtPdf `
         --exclude-module PySide6.QtWebEngineWidgets `
         --exclude-module PySide6.QtWebEngineCore `
+        --exclude-module pyi_splash `
         --name $ExeName `
         installer_main.py
     
