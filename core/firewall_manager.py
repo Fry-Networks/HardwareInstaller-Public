@@ -174,9 +174,3 @@ class FirewallManager:
         olostep = Path(os.environ.get('LOCALAPPDATA', '')) / 'Olostep-Browser' / 'OlostepBrowser.exe'
         if olostep.exists():
             self.add_rule("FryNetworks Olostep Browser", olostep)
-
-    def ensure_updater_rule(self) -> None:
-        """Add rule for the updater if deployed."""
-        updater = Path(r'C:\ProgramData\FryNetworks\updater\frynetworks_updater.exe')
-        if updater.exists():
-            self.add_rule("FryNetworks Updater", updater)

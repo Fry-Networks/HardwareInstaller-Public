@@ -379,7 +379,7 @@ class ConfigManager:
             "miner_group": key_info["group"],
             "exclusive": key_info["exclusive"],
             "installer_version": "1.0.0",
-            "installed_by": "FryNetworks Installer",
+            "installed_by": "Fry Hub",
             "install_date": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": self.platform,
             "validated": True

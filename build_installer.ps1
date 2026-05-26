@@ -1,5 +1,14 @@
-param([string]$Version = "")
+﻿param([string]$Version = "")
 $ErrorActionPreference = "Stop"
+
+# Guard: quarantine any pre-existing stale build_config.json to prevent embedding dummy config
+$StaleConfigPath = Join-Path $PWD "build_config.json"
+if (Test-Path $StaleConfigPath) {
+    $StaleConfigBackup = "$StaleConfigPath.stale.$(Get-Date -Format 'yyyyMMdd_HHmmss').bak"
+    Copy-Item $StaleConfigPath $StaleConfigBackup -Force
+    Remove-Item $StaleConfigPath -Force
+    Write-Host "  [GUARD] Quarantined stale build_config.json to $StaleConfigBackup" -ForegroundColor Yellow
+}
 
 # 1Password references for retrieving secrets at build time
 $OP_BEARER_TOKEN_REF = "op://HardwareAPI/Hardware_API/API_BEARER_TOKEN"
@@ -24,7 +33,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     $VersionFile = Join-Path $PSScriptRoot "version.py"
     if (Test-Path $VersionFile) {
         $VersionContent = Get-Content $VersionFile -Raw
-        if ($VersionContent -match '__version__\s*=\s*["' + "'" + ']([^"' + "'" + ']+)["' + "'" + ']') {
+        if ($VersionContent -match 'WINDOWS_VERSION\s*=\s*["' + "'" + ']([^"' + "'" + ']+)["' + "'" + ']') {
             $Version = $matches[1]
             Write-Host "  [OK] Version from version.py: $Version" -ForegroundColor Green
         } else {
@@ -38,7 +47,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 Write-Host "========================================"  -ForegroundColor Cyan
-Write-Host "FryNetworks Installer Build Script" -ForegroundColor Cyan
+Write-Host "Fry Hub Build Script" -ForegroundColor Cyan
 Write-Host "Version: $Version" -ForegroundColor Cyan
 Write-Host "========================================"  -ForegroundColor Cyan
 $InstallerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -170,6 +179,15 @@ $BuildConfig = @{
 } | ConvertTo-Json -Depth 10
 [System.IO.File]::WriteAllText("$PWD\build_config.json", $BuildConfig, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "  [OK] build_config.json created" -ForegroundColor Green
+
+# Validate nested bearer_token key presence
+$BuildConfigObj = $BuildConfig | ConvertFrom-Json
+if ($BuildConfigObj.external_api.PSObject.Properties.Name -contains 'bearer_token') {
+    Write-Host "  [VALIDATE] external_api.bearer_token: PRESENT" -ForegroundColor Green
+} else {
+    Write-Host "  [VALIDATE] external_api.bearer_token: ABSENT" -ForegroundColor Red
+}
+
 Write-Host "`n[3/4] Preparing embedded resources..." -ForegroundColor Yellow
 
 # Copy NSSM (required utility)
@@ -192,23 +210,49 @@ Write-Host "`n[4/5] Cleaning previous builds..." -ForegroundColor Yellow
 Remove-Item -Force -Recurse build,dist -ErrorAction SilentlyContinue
 Write-Host "  [OK] Build directories cleaned" -ForegroundColor Green
 
-# Build updater first so MSI bundling finds it in dist\
-Write-Host "`n[5a/5] Building updater with PyInstaller..." -ForegroundColor Yellow
-try {
-    py -m PyInstaller `
-        --onefile `
-        --noconsole `
-        --paths "." `
-        --icon "resources\frynetworks_logo.ico" `
-        --name frynetworks_updater `
-        tools\updater.py
-    if (-not (Test-Path "dist\frynetworks_updater.exe")) { throw "updater.exe not found after build" }
-    Write-Host "  [OK] updater built: dist\frynetworks_updater.exe" -ForegroundColor Green
-} catch {
-    Write-Host "`n[FAIL] Updater build failed" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    exit 1
-}
+# Regenerate version_info.txt so the binary embeds correct metadata
+$VersionParts = $Version -split '\.' | ForEach-Object { [int]$_ }
+while ($VersionParts.Length -lt 4) { $VersionParts += 0 }
+$VersionTuple = ($VersionParts[0..3] -join ', ')
+$VersionInfoPath = Join-Path $PSScriptRoot "resources\version_info.txt"
+@"
+# UTF-8
+#
+# For more details about fixed file info see:
+# http://msdn.microsoft.com/en-us/library/ms646997.aspx
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=($VersionTuple),
+    prodvers=($VersionTuple),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'040904B0',
+          [
+            StringStruct(u'CompanyName', u'Fry Networks'),
+            StringStruct(u'FileDescription', u'Fry Hub'),
+            StringStruct(u'FileVersion', u'$Version'),
+            StringStruct(u'InternalName', u'frynetworks_installer'),
+            StringStruct(u'OriginalFilename', u'frynetworks_installer.exe'),
+            StringStruct(u'ProductName', u'Fry Hub'),
+            StringStruct(u'ProductVersion', u'$Version'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+"@ | Out-File -FilePath $VersionInfoPath -Encoding utf8 -Force
+Write-Host "  [OK] Regenerated resources\version_info.txt for $Version" -ForegroundColor Green
 
 Write-Host "`n[5b/5] Building installer with PyInstaller..." -ForegroundColor Yellow
 Write-Host "  This may take 30-60 seconds..." -ForegroundColor Gray
@@ -231,16 +275,19 @@ try {
         --hidden-import "core.conflict_detector" `
         --hidden-import "core.naming" `
         --hidden-import "core.key_parser" `
+        --hidden-import "serial" `
+        --hidden-import "serial.tools" `
+        --hidden-import "serial.tools.list_ports" `
         --collect-submodules "core" `
-        --icon "resources\frynetworks_logo.ico" `
-        --splash "resources\frynetworks_splash.png" `
+        --icon "resources\fryhub.ico" `
+        --version-file "resources\version_info.txt" `
         --add-data "build_config.json;." `
         --add-data "resources\background.png;resources" `
+        --add-data "resources\fryhub.ico;resources" `
         --add-data "resources\frynetworks_logo.ico;resources" `
         --add-data "resources\embedded;resources\embedded" `
         --add-data "SDK;SDK" `
         --add-data "core;core" `
-        --add-data "dist\frynetworks_updater.exe;." `
         --exclude-module numpy `
         --exclude-module PIL `
         --exclude-module Pillow `
@@ -249,6 +296,7 @@ try {
         --exclude-module PySide6.QtPdf `
         --exclude-module PySide6.QtWebEngineWidgets `
         --exclude-module PySide6.QtWebEngineCore `
+        --exclude-module pyi_splash `
         --name $ExeName `
         installer_main.py
     
@@ -262,6 +310,18 @@ try {
         Write-Host "`nTo test the installer:" -ForegroundColor Cyan
         Write-Host "  cd dist" -ForegroundColor White
         Write-Host "  .\$ExeName.exe --gui" -ForegroundColor White
+        # Update fryhub_version.json with the built exe SHA256
+        $ManifestPath = Join-Path $InstallerDir "fryhub_version.json"
+        if (Test-Path $ManifestPath) {
+            $ExeHash = (Get-FileHash "dist\$ExeName.exe" -Algorithm SHA256).Hash
+            $DownloadUrl = "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases/download/v$Version/FryHubSetup-$Version.exe"
+            $ManifestObj = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+            $ManifestObj.hub_version = $Version
+            $ManifestObj.setup_sha256 = $ExeHash
+            $ManifestObj.setup_url = $DownloadUrl
+            $ManifestObj | ConvertTo-Json -Depth 4 | Set-Content $ManifestPath -Encoding UTF8
+            Write-Host "`n  [OK] Updated fryhub_version.json (SHA256=$($ExeHash.Substring(0,16))...)" -ForegroundColor Green
+        }
     } else { throw "Build completed but executable not found" }
 } catch {
     Write-Host "`n[FAIL] Build failed" -ForegroundColor Red
@@ -270,7 +330,13 @@ try {
 } finally {
     if (Test-Path "build_config.json") {
         Remove-Item "build_config.json" -Force
-        Write-Host "`n  Cleaned up build_config.json" -ForegroundColor Gray
+        if (Test-Path "build_config.json") {
+            Write-Host "`n  [FAIL] build_config.json cleanup failed — file still exists" -ForegroundColor Red
+        } else {
+            Write-Host "`n  [OK] build_config.json cleaned up" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "`n  [OK] build_config.json already absent" -ForegroundColor Green
     }
     # Clean up embedded NSSM (it's now in the exe)
     if (Test-Path "resources\embedded\nssm.exe") {

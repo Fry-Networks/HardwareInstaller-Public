@@ -1,4 +1,4 @@
-"""
+﻿"""
 FryNetworks Installer GUI Window
 
 Main graphical interface for the FryNetworks miner installer with:
@@ -18,6 +18,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, cast, Optional, List, Set, Callable
+import socket
+from datetime import datetime, timezone
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -37,7 +39,7 @@ from tools.theme import Theme
 from tools.banner import TopBanner
 
 # Import external API client from tools package
-from tools.external_api import get_external_api_client, ExternalApiClient, _BUILD_CONFIG
+from tools.external_api import get_external_api_client, get_external_api_client_if_complete, ExternalApiClient, _BUILD_CONFIG
 from version import __version__ as version_str
 
 # Track 3: Mysterium TOS gate + install-time provisioning
@@ -72,8 +74,8 @@ class _WelcomeDataWorker(QtCore.QThread):
             'test_windows_set': set(), 'test_linux_set': set(),
         }
         try:
-            client = ExternalApiClient(self._api_base_url, token=self._api_token, timeout=5.0)
-            client._RETRY_DELAYS = []
+            client = ExternalApiClient(self._api_base_url, token=self._api_token, timeout=10.0)
+            client._RETRY_DELAYS = [1, 2, 4]
 
             slog.info("_WelcomeDataWorker: fetching windows installers")
             result['supported_windows'] = client.get_supported_installers('windows', use_test=False) or {}
@@ -109,6 +111,23 @@ class _FirewallSweepWorker(QtCore.QThread):
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _VersionFetchWorker(QtCore.QThread):
+    """Fetches latest versions for installations in a background thread."""
+    finished = QtCore.Signal(object, int)
+
+    def __init__(self, fetch_callable: Callable[[], Dict[str, Any]], seq: int, parent=None):
+        super().__init__(parent)
+        self._fetch = fetch_callable
+        self._seq = seq
+
+    def run(self):
+        try:
+            result = self._fetch()
+            self.finished.emit(result, self._seq)
+        except Exception as e:
+            self.finished.emit({"_error": str(e)}, self._seq)
 
 
 class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
@@ -188,6 +207,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self._last_install_ctx: Optional[Dict[str, Any]] = None
         self._firewall_sweep_started: bool = False
         self._firewall_worker: Optional[_FirewallSweepWorker] = None
+        self._version_fetch_seq: int = 0
+        self._active_version_workers: dict[int, _VersionFetchWorker] = {}
         self._browsers_running_at_install: list = []
 
         # Track whether the progress log has been seeded for the current run (kept for safety)
@@ -219,9 +240,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         # Load FryNetworks icon early so tray icon setup can use it
         if getattr(sys, 'frozen', False):
             base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
-            icon_path = base_path / "resources" / "frynetworks_logo.ico"
+            icon_path = base_path / "resources" / "fryhub.ico"
         else:
-            icon_path = Path(__file__).parent.parent / "resources" / "frynetworks_logo.ico"
+            icon_path = Path(__file__).parent.parent / "resources" / "fryhub.ico"
 
         if icon_path.exists():
             self._app_icon = QtGui.QIcon(str(icon_path))
@@ -272,9 +293,9 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         if display_version:
             # Avoid double "v" when version already includes it (e.g., v1.1.1)
             prefix = "" if display_version.lstrip().lower().startswith("v") else "v"
-            window_title = f"Fry Networks Miners and Nodes Installer {prefix}{display_version}{platform_suffix}"
+            window_title = f"Fry Hub {prefix}{display_version}{platform_suffix}"
         else:
-            window_title = f"Fry Networks Miners and Nodes Installer{platform_suffix}"
+            window_title = f"Fry Hub{platform_suffix}"
         
         # Add TEST VERSIONS suffix when test mode is enabled
         if self._use_test_versions:
@@ -285,14 +306,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.resize(900, 800)
         self._slog.info("FryNetworksInstallerWindow.__init__() finished")
 
-        # Best-effort cleanup of Orbit/WebAgent residue from pre-v4.0.13 installs
-        try:
-            self._cleanup_aem_companions()
-        except Exception as e:
-            try:
-                self._slog.warning(f"legacy companion cleanup failed (best-effort): {e}")
-            except Exception:
-                pass
+        # Best-effort cleanup of Orbit/WebAgent residue — deferred to post-show
+        QtCore.QTimer.singleShot(500, lambda: self._cleanup_aem_companions() if hasattr(self, '_cleanup_aem_companions') else None)
 
     def _debug_log(self, message: str) -> None:
         """Best-effort append-only debug logger for installer events."""
@@ -499,11 +514,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        # Initialize tray icon/menu
-        try:
-            self._setup_tray_icon()
-        except Exception:
-            pass
+        # Tray icon deferred to post-show (was ~0.5s in setup_ui critical path)
+        QtCore.QTimer.singleShot(250, self._setup_tray_icon)
 
         # Create wizard for installation process
         self.wizard = QtWidgets.QWizard()        
@@ -525,7 +537,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
         
         # Configure wizard
-        self.wizard.setWindowTitle("Fry Networks Miners and Nodes Installer")
+        self.wizard.setWindowTitle("Fry Hub")
         self.wizard.setWizardStyle(QtWidgets.QWizard.WizardStyle.ModernStyle)
         self.wizard.setOptions(
             QtWidgets.QWizard.WizardOption.NoBackButtonOnStartPage |
@@ -616,7 +628,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             background_path = Path(__file__).parent.parent / "resources" / "background.png"
         
         self.banner = TopBanner(
-            "Fry Networks Miners and Nodes Installer",
+            "Fry Hub",
             str(background_path) if background_path.exists() else None,
             height=120
         )
@@ -762,7 +774,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "Fry Networks Miners and Nodes Installer",
+                    "Fry Hub",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -793,9 +805,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     )
                     table_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
                     table_label.setWordWrap(True)
-                    tc_layout.addWidget(table_label, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+                    table_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+                    tc_layout.addWidget(table_label)
                     self._welcome_table_label = table_label
-                    main_layout.addWidget(table_container)
+                    main_layout.addWidget(table_container, 1)
                 except Exception:
                     try:
                         fallback_container = QtWidgets.QWidget()
@@ -908,12 +921,25 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     try:
                         cfg_dir = Path(install_dir) / 'config'
                         cfg_dir.mkdir(exist_ok=True)
-                        installer_cfg = {
+                        cfg_path = cfg_dir / 'installer_config.json'
+                        # Read-merge-write: preserve miner_code, poc_version, etc.
+                        existing_cfg = {}
+                        if cfg_path.exists():
+                            try:
+                                existing_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                            except (json.JSONDecodeError, ValueError):
+                                pass  # non-fatal in GUI welcome-data path
+                        merged = existing_cfg.copy()
+                        merged.update({
                             'version_platform': version_platform,
                             'installer_version': version_str or "",
-                        }
-                        with (cfg_dir / 'installer_config.json').open('w', encoding='utf-8') as jf:
-                            json.dump(installer_cfg, jf, indent=2)
+                        })
+                        tmp_path = cfg_path.with_suffix('.json.tmp')
+                        tmp_path.write_text(
+                            json.dumps(merged, indent=2) + '\n', encoding='utf-8'
+                        )
+                        import os as _os
+                        _os.replace(str(tmp_path), str(cfg_path))
                     except Exception:
                         pass
             except Exception:
@@ -1028,7 +1054,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         body_rows: List[str] = []
         for code in row_order:
             display_name = miner_name_for(code)
-            
+
+            # Build cell HTML: escape name (safe), then optionally append raw HTML note
+            cell_html = escape(display_name)
+            if code not in ("AEM", "BM"):
+                cell_html += (
+                    "<br><span style='font-size:11px; color:#f59e0b; font-style:italic;'>"
+                    "\u26a0 Experimental / Early Alpha \u2014 open a Discord ticket for issues"
+                    "</span>"
+                )
+
             # Windows column: show ✓ - TEST for both, TEST for test-only, ✓ for prod only, ✗ for unavailable
             if code in both_win:
                 # Both prod and test: checkmark for prod, separator, TEST for test
@@ -1076,7 +1111,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             body_rows.append(
                 "<tr>"
                 f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06);'>{escape(code)}</td>"
-                f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; line-height:1.1;'>{escape(display_name)}</td>"
+                f"<td style='padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; line-height:1.1;'>{cell_html}</td>"
                 f"<td style='text-align:center; padding:8px 10px; color:{win_color}; {win_style} border-bottom:1px solid rgba(255,255,255,0.06);'>{win_avail}</td>"
                 f"<td style='text-align:center; padding:8px 10px; color:{lin_color}; {lin_style} border-bottom:1px solid rgba(255,255,255,0.06);'>{lin_avail}</td>"
                 "</tr>"
@@ -1627,7 +1662,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     banner_path = Path(__file__).parent.parent / "resources" / "background.png"
                 banner = TopBanner(
-                    "Fry Networks Miners and Nodes Installer",
+                    "Fry Hub",
                     str(banner_path) if banner_path.exists() else None,
                     height=140
                 )
@@ -1658,9 +1693,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 table_label = QtWidgets.QLabel(welcome_html)
                 table_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
                 table_label.setWordWrap(True)
-                tc_layout.addWidget(table_label, alignment=QtCore.Qt.AlignmentFlag.AlignHCenter)
+                table_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+                tc_layout.addWidget(table_label)
 
-                main_layout.addWidget(table_container)
+                main_layout.addWidget(table_container, 1)
             except Exception:
                 pass
 
@@ -1985,8 +2021,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 gui_version = install.get('config', {}).get('gui_version', '').strip()
                 poc_version = install.get('config', {}).get('poc_version', '').strip()
                 
-                # Only include installations that have a valid miner key and both versions
-                if miner_key and gui_version and poc_version and gui_version != 'Unknown' and poc_version != 'Unknown':
+                # Include installations that have at least one identifier (key or version)
+                if (miner_key or gui_version or poc_version) and gui_version != 'Unknown' and poc_version != 'Unknown':
                     valid_installations.append(install)
             
             installations = valid_installations
@@ -2004,125 +2040,22 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self._update_version_warning_label(None)
                 return
             
-            # Get latest versions from API for comparison
-            latest_versions = self._fetch_latest_versions_for_installations(installations)
-            
-            # Populate table
-            for row_idx, install in enumerate(installations):
-                table.insertRow(row_idx)
-                
-                # Column 0: Miner Key
-                miner_key = install.get('config', {}).get('miner_key', 'N/A')
-                key_item = QtWidgets.QTableWidgetItem(miner_key)
-                key_item.setData(QtCore.Qt.ItemDataRole.UserRole, install)  # Store full install data
-                key_item.setToolTip(miner_key)  # Show full key on hover
-                table.setItem(row_idx, 0, key_item)
-                
-                # Column 1: GUI Version
-                gui_version = install.get('config', {}).get('gui_version', 'Unknown')
-                gui_version_item = QtWidgets.QTableWidgetItem(gui_version)
-                gui_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_idx, 1, gui_version_item)
-                
-                # Column 2: GUI Status
-                miner_code = str(install.get('miner_code') or '')
-                latest = latest_versions.get(miner_code, {})
-                latest_gui = latest.get('software_version', '')
-                gui_uptodate = False
-                gui_symbol = "?"
-                gui_tooltip = "Version status unknown"
-                if latest_gui and gui_version != 'Unknown':
-                    gui_uptodate = (gui_version == latest_gui)
-                    if gui_uptodate:
-                        gui_symbol = "✓"
-                        gui_tooltip = "Up-to-date"
-                    else:
-                        gui_symbol = "⚠"
-                        gui_tooltip = f"Update available: {latest_gui}"
-                elif latest_gui:
-                    gui_symbol = "⚠"
-                    gui_tooltip = f"Installed version unknown. Latest: {latest_gui}"
-                gui_status_item = QtWidgets.QTableWidgetItem(gui_symbol)
-                gui_status_item.setToolTip(gui_tooltip)
-                gui_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if gui_uptodate:
-                    gui_status_item.setForeground(QtGui.QColor("#10b981"))  # Green
-                elif latest_gui:
-                    gui_status_item.setForeground(QtGui.QColor("#f59e0b"))  # Amber when update needed/unknown
-                else:
-                    gui_status_item.setForeground(QtGui.QColor("#9ca3af"))  # Neutral gray
-                table.setItem(row_idx, 2, gui_status_item)
-                
-                # Column 3: PoC Version
-                poc_version = install.get('config', {}).get('poc_version', 'Unknown')
-                poc_version_item = QtWidgets.QTableWidgetItem(poc_version)
-                poc_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_idx, 3, poc_version_item)
-                
-                # Column 4: PoC Status
-                latest_poc = latest.get('poc_version', '')
-                poc_uptodate = False
-                poc_symbol = "?"
-                poc_tooltip = "Version status unknown"
-                if latest_poc and poc_version != 'Unknown':
-                    poc_uptodate = (poc_version == latest_poc)
-                    if poc_uptodate:
-                        poc_symbol = "✓"
-                        poc_tooltip = "Up-to-date"
-                    else:
-                        poc_symbol = "⚠"
-                        poc_tooltip = f"Update available: {latest_poc}"
-                elif latest_poc:
-                    poc_symbol = "⚠"
-                    poc_tooltip = f"Installed version unknown. Latest: {latest_poc}"
-                poc_status_item = QtWidgets.QTableWidgetItem(poc_symbol)
-                poc_status_item.setToolTip(poc_tooltip)
-                poc_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if poc_uptodate:
-                    poc_status_item.setForeground(QtGui.QColor("#10b981"))  # Green
-                elif latest_poc:
-                    poc_status_item.setForeground(QtGui.QColor("#f59e0b"))  # Amber when update needed/unknown
-                else:
-                    poc_status_item.setForeground(QtGui.QColor("#9ca3af"))  # Neutral gray
-                table.setItem(row_idx, 4, poc_status_item)
-                
-                # Column 5: Action buttons
-                action_widget = QtWidgets.QWidget()
-                action_layout = QtWidgets.QHBoxLayout(action_widget)
-                action_layout.setContentsMargins(4, 2, 4, 2)  # Small margins on all sides
-                action_layout.setSpacing(4)
-                
-                # Combined Start button
-                action_layout.addStretch()
-                start_btn = QtWidgets.QPushButton("Start")
-                start_btn.setFixedSize(60, 24)
-                start_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
-                start_btn.clicked.connect(lambda checked, r=row_idx: self._start_miner(r, use_dialog))
-                action_layout.addWidget(start_btn)
-                
-                needs_update = (latest_gui and not gui_uptodate) or (latest_poc and not poc_uptodate)
-                if needs_update:
-                    update_btn = QtWidgets.QPushButton("Update")
-                    update_btn.setFixedSize(60, 24)
-                    update_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
-                    update_btn.clicked.connect(lambda checked, r=row_idx: self._update_installation(r, use_dialog))
-                    action_layout.addWidget(update_btn)
-                    
-                uninstall_btn = QtWidgets.QPushButton("Uninstall")
-                uninstall_btn.setFixedSize(70, 24)
-                uninstall_btn.setStyleSheet("min-width: 70px; max-width: 70px; padding-top: 0px; padding-bottom: 4px;")
-                uninstall_btn.clicked.connect(lambda checked, r=row_idx: self._uninstall_installation(r, use_dialog))
-                action_layout.addWidget(uninstall_btn)
-                action_layout.addStretch()
-                
-                table.setCellWidget(row_idx, 5, action_widget)
-            
-            # Adjust row heights to fully show buttons
-            for row_idx in range(table.rowCount()):
-                table.setRowHeight(row_idx, 40)
-
-            warnings = self._build_version_warning_entries(installations, latest_versions)
-            self._handle_version_warning_update(warnings)
+            # Launch worker for version fetch + table population
+            if any(w.isRunning() for w in self._active_version_workers.values()):
+                self.statusBar().showMessage("Refresh already in progress...")
+                return
+            self._version_fetch_seq += 1
+            seq = self._version_fetch_seq
+            worker = _VersionFetchWorker(
+                lambda: self._fetch_latest_versions_for_installations(installations),
+                seq,
+                parent=self
+            )
+            self._active_version_workers[seq] = worker
+            worker.finished.connect(
+                lambda result, got_seq: self._on_versions_fetched(installations, result, got_seq, use_dialog)
+            )
+            worker.start()
     
         except Exception as e:
             import traceback
@@ -2132,6 +2065,136 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 "Error",
                 f"Failed to detect installations:\n{str(e)}\n\nSee console for details."
             )
+
+    def _on_versions_fetched(self, installations: List[Dict[str, Any]], result: Dict[str, Any], got_seq: int, use_dialog: bool = False) -> None:
+        """Slot called on main thread when version fetch worker finishes."""
+        self._active_version_workers.pop(got_seq, None)
+        if got_seq != self._version_fetch_seq:
+            return
+        if result is None or isinstance(result, dict) and result.get("_error"):
+            self._slog.warning(f"_on_versions_fetched: fetch failed — {result}")
+            return
+        latest_versions = result
+        # --- table population (moved from _refresh_installations) ---
+        if use_dialog:
+            table = getattr(self, '_dialog_installations_table', None)
+        else:
+            table = getattr(self, 'installations_table', None)
+        if not table:
+            return
+        table.setRowCount(0)
+        for row_idx, install in enumerate(installations):
+            table.insertRow(row_idx)
+            miner_key = install.get('config', {}).get('miner_key', 'N/A')
+            key_item = QtWidgets.QTableWidgetItem(miner_key)
+            key_item.setData(QtCore.Qt.ItemDataRole.UserRole, install)
+            key_item.setToolTip(miner_key)
+            table.setItem(row_idx, 0, key_item)
+            gui_version = install.get('config', {}).get('gui_version', 'Unknown')
+            gui_version_item = QtWidgets.QTableWidgetItem(gui_version)
+            gui_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row_idx, 1, gui_version_item)
+            miner_code = str(install.get('miner_code') or '')
+            latest = latest_versions.get(miner_code, {})
+            latest_gui = latest.get('software_version', '')
+            gui_uptodate = False
+            gui_symbol = "?"
+            gui_tooltip = "Version status unknown"
+            if latest_gui and gui_version != 'Unknown':
+                gui_uptodate = (gui_version == latest_gui)
+                if gui_uptodate:
+                    gui_symbol = "✓"
+                    gui_tooltip = "Up-to-date"
+                else:
+                    gui_symbol = "⚠"
+                    gui_tooltip = f"Update available: {latest_gui}"
+            elif latest_gui:
+                gui_symbol = "⚠"
+                gui_tooltip = f"Installed version unknown. Latest: {latest_gui}"
+            gui_status_item = QtWidgets.QTableWidgetItem(gui_symbol)
+            gui_status_item.setToolTip(gui_tooltip)
+            gui_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            if gui_uptodate:
+                gui_status_item.setForeground(QtGui.QColor("#10b981"))
+            elif latest_gui:
+                gui_status_item.setForeground(QtGui.QColor("#f59e0b"))
+            else:
+                gui_status_item.setForeground(QtGui.QColor("#9ca3af"))
+            table.setItem(row_idx, 2, gui_status_item)
+            poc_version = install.get('config', {}).get('poc_version', 'Unknown')
+            poc_version_item = QtWidgets.QTableWidgetItem(poc_version)
+            poc_version_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row_idx, 3, poc_version_item)
+            latest_poc = latest.get('poc_version', '')
+            poc_uptodate = False
+            poc_symbol = "?"
+            poc_tooltip = "Version status unknown"
+            if latest_poc and poc_version != 'Unknown':
+                poc_uptodate = (poc_version == latest_poc)
+                if poc_uptodate:
+                    poc_symbol = "✓"
+                    poc_tooltip = "Up-to-date"
+                else:
+                    poc_symbol = "⚠"
+                    poc_tooltip = f"Update available: {latest_poc}"
+            elif latest_poc:
+                poc_symbol = "⚠"
+                poc_tooltip = f"Installed version unknown. Latest: {latest_poc}"
+            poc_status_item = QtWidgets.QTableWidgetItem(poc_symbol)
+            poc_status_item.setToolTip(poc_tooltip)
+            poc_status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            if poc_uptodate:
+                poc_status_item.setForeground(QtGui.QColor("#10b981"))
+            elif latest_poc:
+                poc_status_item.setForeground(QtGui.QColor("#f59e0b"))
+            else:
+                poc_status_item.setForeground(QtGui.QColor("#9ca3af"))
+            table.setItem(row_idx, 4, poc_status_item)
+            action_widget = QtWidgets.QWidget()
+            action_layout = QtWidgets.QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(4, 2, 4, 2)
+            action_layout.setSpacing(4)
+            action_layout.addStretch()
+            start_btn = QtWidgets.QPushButton("Start")
+            start_btn.setFixedSize(60, 24)
+            start_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
+            start_btn.clicked.connect(lambda checked, r=row_idx: self._start_miner(r, use_dialog))
+            action_layout.addWidget(start_btn)
+            needs_update = (latest_gui and not gui_uptodate) or (latest_poc and not poc_uptodate)
+            if needs_update:
+                update_btn = QtWidgets.QPushButton("Update")
+                update_btn.setFixedSize(60, 24)
+                update_btn.setStyleSheet("min-width: 60px; max-width: 60px; padding-top: 0px; padding-bottom: 4px;")
+                update_btn.clicked.connect(lambda checked, r=row_idx: self._update_installation(r, use_dialog))
+                action_layout.addWidget(update_btn)
+            uninstall_btn = QtWidgets.QPushButton("Uninstall")
+            uninstall_btn.setFixedSize(70, 24)
+            uninstall_btn.setStyleSheet("min-width: 70px; max-width: 70px; padding-top: 0px; padding-bottom: 4px;")
+            uninstall_btn.clicked.connect(lambda checked, r=row_idx: self._uninstall_installation(r, use_dialog))
+            action_layout.addWidget(uninstall_btn)
+            action_layout.addStretch()
+            table.setCellWidget(row_idx, 5, action_widget)
+        for row_idx in range(table.rowCount()):
+            table.setRowHeight(row_idx, 40)
+        warnings = self._build_version_warning_entries(installations, latest_versions)
+        self._handle_version_warning_update(warnings)
+
+    def _on_version_timer_result(self, result: Dict[str, Any], got_seq: int) -> None:
+        """Slot called on main thread when timer-driven version fetch finishes."""
+        self._active_version_workers.pop(got_seq, None)
+        if got_seq != self._version_fetch_seq:
+            return
+        if result is None or isinstance(result, dict) and result.get("_error"):
+            self._slog.warning(f"_on_version_timer_result: fetch failed — {result}")
+            return
+        latest_versions = result
+        # Re-detect installations for timer path (may have changed since fetch started)
+        try:
+            installations = ConfigManager().detect_existing_installations()
+            warnings = self._build_version_warning_entries(installations, latest_versions)
+            self._handle_version_warning_update(warnings)
+        except Exception as e:
+            self._update_version_warning_label([f"Unable to check versions: {e}"])
 
     def _refresh_manage_views_once(self) -> None:
         """Refresh manage tables (dialog and panel) once if they exist."""
@@ -2317,9 +2380,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             current_poc = config.get('poc_version')
             required_poc = latest.get('poc_version')
 
-            if required_gui and current_gui and current_gui != "Unknown" and current_gui != required_gui:
+            from core.hub_updater import _compare_versions
+            if required_gui and current_gui and current_gui != "Unknown" and _compare_versions(required_gui, current_gui) != 0:
                 warnings.append(f"{miner_name}: GUI {current_gui} \u2192 {required_gui}")
-            if required_poc and current_poc and current_poc != "Unknown" and current_poc != required_poc:
+            if required_poc and current_poc and current_poc != "Unknown" and _compare_versions(required_poc, current_poc) != 0:
                 warnings.append(f"{miner_name}: PoC {current_poc} \u2192 {required_poc}")
         return warnings
     
@@ -2349,19 +2413,21 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         label = getattr(self, 'version_warning_label', None)
         if not label:
             return
+        try:
+            if not warnings:
+                label.clear()
+                label.setVisible(False)
+                return
 
-        if not warnings:
-            label.clear()
-            label.setVisible(False)
+            # Show a simple, non-detailed warning to avoid clutter on the main page
+            icon_src = self._get_warning_icon_data_url()
+            if icon_src:
+                label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Miner updates available</b>')
+            else:
+                label.setText("<b>Miner updates available</b>")
+            label.setVisible(True)
+        except RuntimeError:
             return
-
-        # Show a simple, non-detailed warning to avoid clutter on the main page
-        icon_src = self._get_warning_icon_data_url()
-        if icon_src:
-            label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Miner updates available</b>')
-        else:
-            label.setText("<b>Miner updates available</b>")
-        label.setVisible(True)
 
     def _handle_version_warning_update(self, warnings: Optional[List[str]]) -> None:
         """Update cached warnings, label, and tray notifications."""
@@ -2382,7 +2448,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 if len(new_warnings) > 3:
                     summary += f"\n(+{len(new_warnings) - 3} more)"
                 self._tray_icon.showMessage(
-                    "Fry Networks Installer",
+                    "Fry Hub",
                     f"Miner updates required:\n{summary}",
                     QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
                     5000,
@@ -2402,15 +2468,26 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
     def _run_version_status_timer(self) -> None:
         """Periodic timer callback to refresh version warnings."""
         try:
+            if any(w.isRunning() for w in self._active_version_workers.values()):
+                return
             config_manager = ConfigManager()
             installations = config_manager.detect_existing_installations()
             self._ensure_version_timer_state(bool(installations))
             if not installations:
                 self._handle_version_warning_update([])
                 return
-            latest_versions = self._fetch_latest_versions_for_installations(installations)
-            warnings = self._build_version_warning_entries(installations, latest_versions)
-            self._handle_version_warning_update(warnings)
+            self._version_fetch_seq += 1
+            seq = self._version_fetch_seq
+            worker = _VersionFetchWorker(
+                lambda: self._fetch_latest_versions_for_installations(installations),
+                seq,
+                parent=self
+            )
+            self._active_version_workers[seq] = worker
+            worker.finished.connect(
+                lambda result, got_seq: self._on_version_timer_result(result, got_seq)
+            )
+            worker.start()
         except Exception as exc:
             self._update_version_warning_label([f"Unable to check versions: {exc}"])
     
@@ -2454,7 +2531,41 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         
         # Perform uninstallation
         self._perform_uninstall(install_data, use_dialog)
-    
+
+    def _read_install_config(self, install_dir: Path) -> Optional[Dict[str, Any]]:
+        """Read and decrypt install_config.enc, returning the config dict or None."""
+        try:
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.fernet import Fernet
+            import base64
+
+            config_path = install_dir / "config" / "install_config.enc"
+            if not config_path.exists():
+                config_path = install_dir / "install_config.enc"
+            if not config_path.exists():
+                return None
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                wrapper = json.load(f)
+            encrypted_data = wrapper.get("data", "")
+            if not encrypted_data:
+                return None
+
+            salt = b'install_config_salt_v1'
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                iterations=100000,
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(b"install_config_encryption_key_v1"))
+            fernet = Fernet(key)
+            decrypted = fernet.decrypt(encrypted_data.encode())
+            return json.loads(decrypted)
+        except Exception:
+            return None
+
     def _start_miner(self, row_idx: int, use_dialog: bool = False):
         """Start/restart both the miner service and GUI."""
         # Get table reference
@@ -2514,7 +2625,28 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self.status_bar.setText(f"Started {miner_name} service")
             else:
                 self._debug_log(f"[START] Service already running")
-            
+
+            # --- Dashboard heartbeat on explicit start ---
+            try:
+                miner_key = install_data.get('config', {}).get('miner_key')
+                install_config = self._read_install_config(install_dir)
+                install_id = install_config.get("install_id") if install_config else None
+                external_ip = install_config.get("external_ip") if install_config else None
+                if miner_key and install_id:
+                    client = get_external_api_client_if_complete(raise_on_missing=False)
+                    if client:
+                        heartbeat_payload = {
+                            "hostname": socket.gethostname(),
+                            "is_installed": True,
+                            "ip_detected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        }
+                        if external_ip:
+                            heartbeat_payload["external_ip"] = external_ip
+                        client.upsert_installation(miner_key, install_id, heartbeat_payload)
+                        self._debug_log(f"[START] Dashboard status synced for {miner_key}")
+            except Exception as hb_err:
+                self._debug_log(f"[START] Dashboard sync skipped: {hb_err}")
+
             # Check if GUI is already running
             gui_exe_name = naming.gui_asset(miner_code, gui_version, windows=True) if gui_version else f"{naming.gui_prefix(miner_code)}.exe"
             gui_running = False
@@ -3874,10 +4006,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
 
         self._slog.info("_setup_tray_icon(): creating QSystemTrayIcon")
         tray = QtWidgets.QSystemTrayIcon(icon, self)
-        tray.setToolTip("Fry Installer - Install and update Fry miners and nodes")
+        tray.setToolTip("Fry Hub - Install and update Fry miners and nodes")
 
         menu = QtWidgets.QMenu(self)
-        show_action = menu.addAction("Show Fry Networks Installer")
+        show_action = menu.addAction("Show Fry Hub")
         autostart_action = menu.addAction("Launch installer on login")
         autostart_action.setCheckable(True)
         autostart_action.setChecked(self._is_installer_autostart_enabled())
@@ -3887,8 +4019,18 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             task_autostart_action.setCheckable(True)
             task_autostart_action.setChecked(self._is_installer_task_autostart_enabled())
         menu.addSeparator()
+        autoupdate_action = menu.addAction("Auto-update Fry Hub")
+        autoupdate_action.setCheckable(True)
+        autoupdate_action.setChecked(self._is_autoupdate_enabled())
+        autoupdate_action.triggered.connect(lambda checked: self._toggle_autoupdate(checked))
+        self._tray_autoupdate_action = autoupdate_action  # keep ref for dialog sync
+
+        settings_action = menu.addAction("Fry Hub Settings...")
+        settings_action.triggered.connect(self._show_hub_settings_dialog)
+
+        menu.addSeparator()
         update_action = menu.addAction("Check for Updates")
-        exit_action = menu.addAction("Exit Fry Networks Installer")
+        exit_action = menu.addAction("Exit Fry Hub")
         show_action.triggered.connect(self._restore_from_tray)
         autostart_action.triggered.connect(lambda checked: self._toggle_installer_autostart(checked))
         if task_autostart_action:
@@ -3901,26 +4043,113 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self._slog.info("_setup_tray_icon(): tray.show() called — tray icon now visible")
         self._tray_icon = tray
 
+    def _is_autoupdate_enabled(self) -> bool:
+        try:
+            from core.hub_config import read_hub_config
+            return bool(read_hub_config().get("auto_update_hub", False))
+        except Exception:
+            return False
+
+    def _app_root(self) -> Path:
+        """Return app root for both frozen PyInstaller and source runs."""
+        if getattr(sys, 'frozen', False):
+            # PyInstaller bundle: executable lives at app root
+            return Path(sys.executable).resolve().parent
+        else:
+            # Source run: __file__ is gui/installer_window.py; app root is parent of gui/
+            return Path(__file__).resolve().parent.parent
+
+    def _toggle_autoupdate(self, checked: bool) -> None:
+        try:
+            from core.hub_config import read_hub_config, write_hub_config
+            cfg = read_hub_config()
+            cfg["auto_update_hub"] = checked
+            write_hub_config(cfg)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error",
+                f"Could not save auto-update setting:\n{exc}"
+            )
+            # Revert tray toggle to previous state
+            if hasattr(self, '_tray_autoupdate_action'):
+                self._tray_autoupdate_action.setChecked(not checked)
+            return
+
+        LOGGER.info("auto_update_hub set to %s", checked)
+
+    def _show_hub_settings_dialog(self) -> None:
+        # Singleton: if dialog already open, raise it
+        if hasattr(self, '_hub_settings_dialog') and self._hub_settings_dialog is not None:
+            self._hub_settings_dialog.raise_()
+            self._hub_settings_dialog.activateWindow()
+            return
+
+        try:
+            from core.hub_config import read_hub_config, write_hub_config
+        except ImportError as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error", f"Could not load settings module:\n{exc}")
+            return
+
+        cfg = read_hub_config()
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Fry Hub Settings")
+        dlg.setMinimumWidth(380)
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        # Auto-update checkbox
+        auto_cb = QtWidgets.QCheckBox("Automatically update Fry Hub when a new version is available")
+        auto_cb.setChecked(bool(cfg.get("auto_update_hub", False)))
+        layout.addWidget(auto_cb)
+
+        layout.addStretch()
+
+        # OK / Cancel buttons
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        self._hub_settings_dialog = dlg
+        try:
+            if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_auto = auto_cb.isChecked()
+                old_auto = bool(cfg.get("auto_update_hub", False))
+                # Only write if value actually changed
+                if new_auto != old_auto:
+                    cfg["auto_update_hub"] = new_auto
+                    try:
+                        write_hub_config(cfg)
+                    except Exception as exc:
+                        QtWidgets.QMessageBox.warning(
+                            self, "Settings Error",
+                            f"Could not save settings:\n{exc}"
+                        )
+                # Sync tray toggle regardless (reflects current persisted state)
+                if hasattr(self, '_tray_autoupdate_action'):
+                    self._tray_autoupdate_action.setChecked(new_auto)
+        finally:
+            self._hub_settings_dialog = None
+
     def _check_for_updates_clicked(self) -> None:
-        """Shell out to the installed updater with stage-text modal progress."""
+        """Inline Hub self-update check using shared core/hub_updater utilities."""
         from pathlib import Path
         from version import WINDOWS_VERSION
-        updater_path = Path(
-            os.environ.get('PROGRAMDATA', r'C:\ProgramData')
-        ) / 'FryNetworks' / 'updater' / 'frynetworks_updater.exe'
-
-        if not updater_path.exists():
-            QtWidgets.QMessageBox.warning(
-                self, "Check for Updates",
-                f"Updater is not installed at:\n{updater_path}\n\n"
-                "Please re-run the installer to repair the updater component."
-            )
-            try:
-                self._slog.warning(
-                    f"Check for Updates: updater missing at {updater_path}")
-            except Exception:
-                pass
-            return
+        from core.hub_updater import (
+            _fetch_hub_manifest,
+            _compare_versions,
+            _download_hub_setup,
+            _launch_hub_setup_and_exit,
+        )
+        from core.hub_config import read_hub_config, write_hub_config
+        from PySide6 import QtWidgets, QtCore
+        import tempfile
+        import threading
+        from datetime import datetime, timezone
 
         progress = QtWidgets.QProgressDialog(
             "Checking for updates...", None, 0, 0, self)
@@ -3930,63 +4159,78 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         progress.setMinimumDuration(0)
         progress.show()
 
-        stage_observed = {'downloading': False, 'launching': False}
-
-        proc = QtCore.QProcess(self)
-        proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
-
-        def _on_ready_read():
-            try:
-                chunk = bytes(proc.readAllStandardOutput()).decode(
-                    "utf-8", errors="replace")
-            except Exception:
-                chunk = ""
-            if not chunk:
-                return
-            try:
-                self._slog.debug(f"updater stdout: {chunk.strip()}")
-            except Exception:
-                pass
-            low = chunk.lower()
-            if "downloading" in low:
-                progress.setLabelText("Downloading update...")
-                stage_observed['downloading'] = True
-            elif "launching" in low or "starting installer" in low or "running installer" in low:
-                progress.setLabelText("Launching installer...")
-                stage_observed['launching'] = True
-            elif "checking" in low or "querying" in low or "fetching release" in low:
-                progress.setLabelText("Checking for updates...")
-
-        def _on_finished(exit_code, _exit_status):
+        manifest = _fetch_hub_manifest(timeout=5)
+        if manifest is None:
             progress.close()
-            if exit_code == 0:
-                if stage_observed['downloading'] or stage_observed['launching']:
-                    QtWidgets.QMessageBox.information(
-                        self, "Check for Updates",
-                        "An update has been downloaded and the new installer "
-                        "has been launched."
-                    )
-                else:
-                    QtWidgets.QMessageBox.information(
-                        self, "Check for Updates",
-                        f"You are already running the latest version of "
-                        f"Fry Networks Installer (v{WINDOWS_VERSION})."
-                    )
-            else:
-                QtWidgets.QMessageBox.warning(
-                    self, "Check for Updates",
-                    f"Updater exited with code {exit_code}.\n\n"
-                    "See the updater log for details."
+            QtWidgets.QMessageBox.warning(
+                self, "Check for Updates",
+                "Could not reach update server (connectivity issue). "
+                "Check your internet connection and try again."
+            )
+            return
+
+        cmp = _compare_versions(manifest["hub_version"], WINDOWS_VERSION)
+        if cmp <= 0:
+            progress.close()
+            QtWidgets.QMessageBox.information(
+                self, "Check for Updates",
+                f"You are already running the latest version of "
+                f"Fry Hub (v{WINDOWS_VERSION})."
+            )
+            return
+
+        new_ver = manifest["hub_version"]
+        progress.setLabelText("Downloading update...")
+
+        dest = (
+            Path(tempfile.gettempdir())
+            / "FryNetworks"
+            / "hub-update"
+            / f"FryHubSetup-{new_ver}.exe"
+        )
+        config = read_hub_config()
+
+        def _download_worker():
+            try:
+                setup_path = _download_hub_setup(
+                    manifest["setup_url"], dest, manifest["setup_sha256"]
                 )
+            except Exception as exc:
+                try:
+                    self._slog.warning(f"Hub update download failed: {exc}")
+                except Exception:
+                    pass
+                setup_path = None
+            try:
+                QtCore.QTimer.singleShot(
+                    0,
+                    lambda: _on_download_done(setup_path),
+                )
+            except Exception as exc:
                 try:
                     self._slog.warning(
-                        f"frynetworks_updater.exe exited with code {exit_code}")
+                        f"Failed to marshal hub update result: {exc}")
                 except Exception:
                     pass
 
-        proc.readyReadStandardOutput.connect(_on_ready_read)
-        proc.finished.connect(_on_finished)
-        proc.start(str(updater_path), ["--current-version", str(WINDOWS_VERSION)])
+        def _on_download_done(setup_path):
+            if setup_path is None:
+                progress.close()
+                QtWidgets.QMessageBox.warning(
+                    self, "Check for Updates",
+                    "Update download failed or did not pass verification.\n\n"
+                    "Please try again later or download the latest version "
+                    "from fry.farm."
+                )
+                return
+            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+            config["last_seen_hub_version"] = manifest["hub_version"]
+            config["update_pending"] = True
+            config["update_pending_version"] = manifest["hub_version"]
+            write_hub_config(config)
+            _launch_hub_setup_and_exit(setup_path, config, manifest, window=self)
+
+        threading.Thread(target=_download_worker, daemon=True).start()
 
     def _restore_from_tray(self):
         """Restore window when user selects Show from tray."""
@@ -4007,7 +4251,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         self.raise_()
         self.activateWindow()
         try:
-            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "Fry Networks Installer is active."
+            status_text = "Enter a miner key and validate it" if getattr(self, '_reset_on_restore', False) else "Fry Hub is active."
             self.status_bar.setText(status_text)
         except Exception:
             pass
@@ -4056,32 +4300,23 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             pass
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        """Intercept close events to minimize to tray unless explicitly exiting.
-        
-        Only minimize to tray if the user has progressed past the welcome screen
-        (clicked "Get Started"). If they close from the welcome screen, fully exit.
+        """Minimize to tray on X-close; exit only via tray 'Exit Fry Hub' or QUIT IPC.
+
+        4.0.21.4: restored tray-hide-on-X (reverts Bug #3 fix from 4.0.21.2).
+        Mutex safety: aboutToQuit releases the mutex only when QApplication.quit()
+        fires (tray Exit or QUIT IPC), not on window hide.
         """
-        try:
-            # Only minimize to tray if we've moved past the welcome screen
-            welcome_closed = getattr(self, '_welcome_closed_by_user', False)
-            if not self._allow_close and self._tray_icon and self._tray_icon.isVisible() and welcome_closed:
-                event.ignore()
-                self.hide()
-                self._reset_on_restore = True
-                if not self._tray_message_shown:
-                    try:
-                        self._tray_icon.showMessage(
-                            "Fry Networks Hub",
-                            "Install and update Fry miners and nodes. Right-click the tray icon to exit.",
-                            QtWidgets.QSystemTrayIcon.MessageIcon.Information,
-                            4000,
-                        )
-                        self._tray_message_shown = True
-                    except Exception:
-                        pass
-                return
-        except Exception:
-            pass
+        if self._allow_close:
+            self._slog.info("closeEvent: _allow_close=True, exiting")
+            super().closeEvent(event)
+            return
+        tray = getattr(self, '_tray_icon', None)
+        if tray and tray.isVisible():
+            event.ignore()
+            self.hide()
+            self._slog.info("closeEvent: minimized to tray")
+            return
+        self._slog.info("closeEvent: no tray available, exiting")
         super().closeEvent(event)
     
     # ---- Installer autostart helpers (tray menu) ----
@@ -4089,7 +4324,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         """Return the per-user autostart entry path for the installer."""
         if os.name == 'nt':
             return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / \
-                "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Fry Installer.lnk"
+                "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Fry Hub.lnk"
         if sys.platform.startswith("linux"):
             cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
             return cfg / "autostart" / "fry-installer.desktop"
@@ -4144,8 +4379,16 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     shortcut_path=path,
                     target_path=exe_path,
                     working_dir=exe_path.parent,
-                    description="Fry Installer"
+                    description="Fry Hub"
                 )
+                # Clean up legacy "Fry Installer.lnk" if present (pre-rename upgrade path)
+                legacy_path = path.parent / "Fry Installer.lnk"
+                if legacy_path.exists():
+                    try:
+                        legacy_path.unlink()
+                        self._debug_log(f"Removed legacy shortcut: {legacy_path}")
+                    except OSError:
+                        pass
                 return True, "Installer will launch automatically on login."
             except Exception as e:
                 return False, f"Failed to enable autostart: {e}"
@@ -4156,7 +4399,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 desktop_contents = "\n".join([
                     "[Desktop Entry]",
                     "Type=Application",
-                    "Name=Fry Installer",
+                    "Name=Fry Hub",
                     f"Exec={exe_path}",
                     f"Path={exe_path.parent}",
                     "X-GNOME-Autostart-enabled=true",
@@ -4175,6 +4418,11 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         try:
             if path and path.exists():
                 path.unlink()
+            # Also clean up legacy "Fry Installer.lnk" if present
+            if path:
+                legacy_path = path.parent / "Fry Installer.lnk"
+                if legacy_path.exists():
+                    legacy_path.unlink()
             return True, "Installer will no longer launch on login."
         except Exception as e:
             return False, f"Failed to disable autostart: {e}"
@@ -4989,6 +5237,32 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             self.status_bar.setText("Conflicts detected - click 'Try Another Key' to enter a different miner key")
             return
 
+        # GPS dongle pre-check for satellite miners (ISM)
+        if miner_info and miner_info.get("code") == "ISM":
+            if not getattr(self, '_quiet_mode', False):
+                try:
+                    from core.gps_detector import detect_gps_dongle
+                    gps_result = detect_gps_dongle(timeout_per_port=2.0)
+                    if not gps_result.get("found"):
+                        from PySide6 import QtWidgets as _qw
+                        reply = _qw.QMessageBox.warning(
+                            self, "GPS Receiver Not Detected",
+                            "No GPS/GNSS receiver was detected on this device.\n\n"
+                            "The Indoor Satellite Miner requires a USB GPS dongle "
+                            "to function and earn rewards.\n\n"
+                            "You can still install, but the miner won't operate "
+                            "without GPS hardware.\n\nContinue anyway?",
+                            _qw.QMessageBox.StandardButton.Yes
+                            | _qw.QMessageBox.StandardButton.Cancel,
+                        )
+                        if reply == _qw.QMessageBox.StandardButton.Cancel:
+                            return
+                except Exception as _gps_exc:
+                    try:
+                        self._slog.warning(f"GPS pre-check failed: {_gps_exc}")
+                    except Exception:
+                        pass
+
         # Show progress and concise header
         try:
             self.progress_group.setVisible(True)
@@ -5455,47 +5729,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         self.log_progress(f"[warning] Could not configure GUI autostart: {startup_err}")
                         self._debug_log(f"Startup shortcut creation failed: {startup_err}")
 
-                # ---- Auto-updater scheduled task ----
-                if os.name == 'nt':
-                    try:
-                        import shutil
-                        from pathlib import Path as _UP
-
-                        # Locate bundled updater exe
-                        if getattr(sys, 'frozen', False):
-                            updater_src = _UP(sys._MEIPASS) / 'frynetworks_updater.exe'
-                        else:
-                            updater_src = _UP(__file__).resolve().parent.parent / 'dist' / 'frynetworks_updater.exe'
-
-                        if updater_src.exists():
-                            updater_dest_dir = _UP(os.environ.get('PROGRAMDATA', 'C:\\ProgramData')) / 'FryNetworks' / 'updater'
-                            updater_dest_dir.mkdir(parents=True, exist_ok=True)
-                            updater_dest = updater_dest_dir / 'frynetworks_updater.exe'
-                            shutil.copy2(str(updater_src), str(updater_dest))
-                            self._debug_log(f"Updater exe staged to {updater_dest}")
-
-                            from version import WINDOWS_VERSION
-                            current_ver = f"v{WINDOWS_VERSION}" if not WINDOWS_VERSION.startswith("v") else WINDOWS_VERSION
-                            updater_path_escaped = str(updater_dest).replace("'", "''")
-
-                            register_cmd = f'''
-$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --current-version {current_ver} --update-poc' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
-$triggerLogon = New-ScheduledTaskTrigger -AtLogOn
-$triggerDaily = New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
-Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Highest -Force | Out-Null
-'''
-                            subprocess.run(
-                                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
-                                capture_output=True, timeout=30
-                            )
-                            self.log_progress("Auto-updater scheduled task registered")
-                            self._debug_log("Scheduled task FryNetworksUpdater registered")
-                        else:
-                            self._debug_log(f"Updater exe not found at {updater_src} — skipping task registration")
-                    except Exception as updater_err:
-                        self._debug_log(f"Auto-updater task registration failed: {updater_err}")
-
                 self.update_progress(90, "Finalizing installation...")
                 self.update_progress(100, "Installation completed successfully!")
 
@@ -5528,7 +5761,9 @@ Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\
                             _df.write(tb + "\n")
                 except Exception:
                     pass
-                self.installation_failed("Installation error", [str(e)])
+                # Surface exception class + message to user instead of generic text
+                user_msg = f"Installation error: {type(e).__name__}: {e}"
+                self.installation_failed(user_msg, [str(e)])
         
         self.installation_thread = threading.Thread(target=install, daemon=True)
         self.installation_thread.start()
@@ -6493,7 +6728,6 @@ foreach ($loc in $locations) {{
                     fwm.add_miner_rules(miner_code, miner_dir)
 
         fwm.ensure_olostep_rule()
-        fwm.ensure_updater_rule()
 
         # Rule for the installer EXE itself (only from stable ProgramData path)
         import sys

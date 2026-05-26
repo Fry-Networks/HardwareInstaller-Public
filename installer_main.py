@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 FryNetworks Miner Installer - Main Entry Point
 
@@ -18,13 +18,33 @@ Usage:
 
 import sys
 import argparse
+import hashlib
+import json
 import os
 import logging
+import subprocess
+import threading
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 _logger = logging.getLogger(__name__)
 _logger.addHandler(logging.NullHandler())
+
+# Force UTF-8 for stdout/stderr so redirected CLI output survives on Windows
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # Ensure bundled modules (core/, gui/) are importable both from source and PyInstaller onefile
 _here = Path(__file__).parent
@@ -47,17 +67,68 @@ try:
     from tools.external_api import ExternalApiClient
     from tools.banner import TopBanner
     from tools.theme import Theme
+    from core.hub_config import hub_config_path, read_hub_config, write_hub_config
+    from core.hub_updater import (
+        _attempt_hub_update_check,
+        _attempt_hub_update_check_inner,
+        _compare_versions,
+        _download_hub_setup,
+        _fetch_hub_manifest,
+        _launch_hub_setup_and_exit,
+        _sha256_file,
+        _threaded_download_and_launch,
+    )
 except ImportError as e:
     print(f"Warning: Failed to import some modules: {e}")
     # Continue anyway - we'll try to import them again later
 
+def _attempt_registry_refresh() -> None:
+    """Foreground CDN fetch (3s timeout). Updates MinerKeyParser.MINER_TYPES if fresh data.
+
+    Worst-case 3s latency on broken DNS / partial connectivity.
+    Confirmed-offline (adapter disabled) returns immediately.
+    On failure: no-op — import-time load already populated MINER_TYPES.
+    """
+    try:
+        from core.registry_loader import refresh_from_cdn
+        registry = refresh_from_cdn(timeout=3)
+        if registry is None:
+            return
+        new_types = {
+            entry["code"]: {"name": entry["name"], "group": entry["group"],
+                            "exclusive": entry.get("exclusive")}
+            for entry in registry.get("miners", [])
+        }
+        MinerKeyParser.MINER_TYPES = new_types
+        _logger.info("Registry refreshed from CDN: %d miner types", len(new_types))
+    except Exception as e:
+        _logger.warning("Registry refresh failed (non-critical): %s", e)
+
+
+
+
 def main():
     """Main entry point for the installer."""
+    from version import WINDOWS_VERSION
     # Load environment variables
     load_env()
-    
+
+    # Phase 3e Part 3 fix (c): named mutex for Inno AppMutex interlock.
+    # Held for process lifetime; released automatically on process exit.
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        _CreateMutexW = ctypes.windll.kernel32.CreateMutexW
+        _CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        _CreateMutexW.restype = wintypes.HANDLE
+        global _HUB_INSTANCE_MUTEX  # noqa: PLW0603 — intentional module-level ref
+        _HUB_INSTANCE_MUTEX = _CreateMutexW(None, False, "FryNetworksHubInstanceMutex_v1")
+
+    # Phase 2: attempt CDN registry refresh (3s timeout, fallback to local)
+    _attempt_registry_refresh()
+
     parser = argparse.ArgumentParser(
-        description="Fry Networks Miner Installer",
+        description="Fry Hub",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -72,12 +143,27 @@ Examples:
     # Global options
     parser.add_argument('--gui', action='store_true',
                        help='Launch graphical installer interface')
-    parser.add_argument('--version', action='version', version='Fry Networks Installer 1.0.0')
+    parser.add_argument('--version', action='version', version=f'Fry Hub {WINDOWS_VERSION}')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose output')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress dialogs; used by updater for silent upgrade')
-    
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip launch-time Hub update check')
+
+    auto_grp = parser.add_mutually_exclusive_group()
+    auto_grp.add_argument('--auto-update-hub', action='store_true',
+                         help='Enable automatic Hub updates (persists to hub_config.json)')
+    auto_grp.add_argument('--no-auto-update-hub', action='store_true',
+                         help='Disable automatic Hub updates (persists to hub_config.json)')
+
+    parser.add_argument('--headless', action='store_true',
+                        help='Run update checks without GUI (for scheduled task)')
+    parser.add_argument('--update-poc', action='store_true',
+                        help='Check/update PoC service binaries')
+    parser.add_argument('--update-all', action='store_true',
+                        help='Check hub + PoC updates (default for headless)')
+
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
@@ -133,12 +219,16 @@ Examples:
     
     # Uninstall command
     uninstall_parser = subparsers.add_parser('uninstall', help='Uninstall a miner')
-    uninstall_parser.add_argument('--miner-code', required=True,
-                                help='Miner code to uninstall')
+    uninstall_group = uninstall_parser.add_mutually_exclusive_group(required=True)
+    uninstall_group.add_argument('--miner-code', help='Miner code to uninstall')
+    uninstall_group.add_argument('--all', action='store_true', dest='uninstall_all',
+                                help='Uninstall all installed miners')
     uninstall_parser.add_argument('--system-wide', action='store_true',
                                 help='Uninstall from system-wide location')
     uninstall_parser.add_argument('--remove-data', action='store_true',
                                 help='Remove all data and configuration')
+    uninstall_parser.add_argument('-y', '--yes', action='store_true',
+                                help='Skip confirmation prompts (for headless invocation)')
     
     # List command
     list_parser = subparsers.add_parser('list', help='List installed miners')
@@ -148,6 +238,11 @@ Examples:
     # Parse arguments
     args = parser.parse_args()
     
+    # Headless mode: run update checks without GUI
+    if getattr(args, 'headless', False):
+        from core.hub_updater import run_headless_updates
+        return run_headless_updates(args)
+
     # Handle no command or GUI request
     if not args.command or args.gui:
         return launch_gui(args)
@@ -223,8 +318,8 @@ def _setup_startup_logger() -> logging.Logger:
             datefmt='%Y-%m-%d %H:%M:%S',
         ))
         logger.addHandler(handler)
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.warning("Startup logger setup failed: %s", e)
 
     return logger
 
@@ -267,27 +362,6 @@ def _read_installed_installer_version() -> Optional[str]:
     return None
 
 
-def _compare_versions(a: str, b: str) -> int:
-    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples.
-
-    Inlined here (not imported from tools.updater) because the installer
-    PyInstaller spec does not bundle tools/ as an importable package.
-    """
-    def tup(s):
-        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
-        parts = s.split(".") if s else []
-        out = []
-        for p in parts:
-            try:
-                out.append(int(p))
-            except ValueError:
-                out.append(0)
-        return tuple(out)
-    ta, tb = tup(a), tup(b)
-    if ta < tb: return -1
-    if ta > tb: return 1
-    return 0
-
 
 def _self_downgrade_check():
     """L2: refuse to run if a newer FryNetworks Installer is already installed.
@@ -315,7 +389,7 @@ def _self_downgrade_check():
     msg.setIcon(QtWidgets.QMessageBox.Icon.Critical)
     msg.setWindowTitle("Cannot Install Older Version")
     msg.setText(
-        f"Cannot install Fry Networks Installer v{embedded}.\n\n"
+        f"Cannot install Fry Hub v{embedded}.\n\n"
         f"A newer version (v{installed}) is already installed.\n"
         "Please use your currently installed version or download\n"
         "the latest release from:\n"
@@ -324,6 +398,23 @@ def _self_downgrade_check():
     msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
     msg.exec()
     sys.exit(2)
+
+
+def _safe_pyi_splash(action):
+    """Call action(pyi_splash) if pyi_splash is imported AND its IPC channel is initialized.
+    Otherwise silently return. This avoids RuntimeError spam when the bootloader splash
+    is not actually attached (e.g., onefile + uac_admin issues, or non-frozen runs).
+    """
+    try:
+        import pyi_splash
+    except Exception:
+        return
+    if not getattr(pyi_splash, '_initialized', False):
+        return
+    try:
+        action(pyi_splash)
+    except Exception:
+        pass
 
 
 def launch_gui(args):
@@ -341,11 +432,7 @@ def launch_gui(args):
     _slog.info("=" * 80)
     _slog.info("NEW RUN — launch_gui() entered")
     _slog.info(f"sys.argv={sys.argv}, frozen={getattr(sys, 'frozen', False)}")
-    try:
-        import pyi_splash
-        pyi_splash.update_text('Initializing...')
-    except ImportError:
-        pass
+    _safe_pyi_splash(lambda s: s.update_text('Initializing...'))
 
     try:
         # Check for GUI dependencies
@@ -372,14 +459,22 @@ def launch_gui(args):
         socket.connectToServer(server_name)
         
         if socket.waitForConnected(500):
-            # Another instance is running - send quit command and wait for it to exit
+            # Another instance is running — decide SHOW vs QUIT
+            # QUIT: upgrade path (--quiet from updater) — old exits, new takes over
+            # SHOW: normal relaunch — old restores from tray, new exits
             try:
-                socket.write(b"QUIT")
+                msg = b"QUIT" if getattr(args, 'quiet', False) else b"SHOW"
+                socket.write(msg)
                 socket.flush()
                 socket.waitForBytesWritten(1000)
                 socket.disconnectFromServer()
-                
-                # Wait up to 3 seconds for the old instance to exit
+
+                if msg == b"SHOW":
+                    # Old instance will restore from tray; we exit cleanly
+                    _slog.info("Sent SHOW to existing instance — exiting")
+                    return 0
+
+                # QUIT path: wait up to 3 seconds for the old instance to exit
                 import time
                 for _ in range(30):
                     time.sleep(0.1)
@@ -389,9 +484,9 @@ def launch_gui(args):
                         # Old instance has exited
                         break
                     test_socket.disconnectFromServer()
-            except Exception:
-                pass  # Best effort
-        
+            except Exception as exc:
+                _slog.warning("Single-instance socket check failed: %s", exc)
+
         # Clean up any stale server socket
         QtNetwork.QLocalServer.removeServer(server_name)
 
@@ -412,7 +507,38 @@ def launch_gui(args):
         # Create and run GUI application
         app = QtWidgets.QApplication(sys.argv)
         _slog.info("QApplication created")
-        app.setApplicationName("FryNetworks Installer")
+
+        # Close PyInstaller splash before any modal dialog can be displayed.
+        # Without this, QMessageBox.exec() at L284 (update prompt) and L612
+        # (downgrade prompt) hang indefinitely because the bootloader splash
+        # overlay sits above all Qt windows.
+        _safe_pyi_splash(lambda s: s.close())
+
+        # Bridge: show Qt splash to cover gap between pyi_splash close and window.show()
+        _qt_splash = None
+        try:
+            if getattr(sys, 'frozen', False):
+                _splash_img = Path(sys._MEIPASS) / "resources" / "frynetworks_splash.png"
+            else:
+                _splash_img = Path(__file__).parent / "resources" / "frynetworks_splash.png"
+            if _splash_img.exists():
+                _qt_splash = QtWidgets.QSplashScreen(
+                    QtGui.QPixmap(str(_splash_img)),
+                    QtCore.Qt.WindowType.WindowStaysOnTopHint
+                )
+                _qt_splash.show()
+                app.processEvents()
+                try:
+                    import os as _spl_os
+                    _spl_os.makedirs(r'C:\temp', exist_ok=True)
+                    with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                        _sf.write(f"=== Qt splash OPEN @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+                except Exception as e:
+                    _slog.debug("Splash debug log write failed: %s", e)
+        except Exception as e:
+            _slog.debug("Splash setup failed: %s", e)
+
+        app.setApplicationName("Fry Hub")
         app.setApplicationVersion("1.0.0")
         
         # Set Windows AppUserModelID to prevent duplicate taskbar icons
@@ -422,9 +548,9 @@ def launch_gui(args):
                 import ctypes
                 # Set the AppUserModelID to a unique identifier for this application
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('com.frynetworks.installer')
-            except Exception:
-                pass  # Non-critical if this fails
-        
+            except Exception as e:
+                _slog.debug("AppUserModelID set failed: %s", e)
+
         # Enable high DPI scaling support
         app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
         app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
@@ -432,36 +558,45 @@ def launch_gui(args):
         # Set application icon - check if running from PyInstaller bundle
         if getattr(sys, 'frozen', False):
             base_path = Path(sys._MEIPASS)  # type: ignore
-            icon_path = base_path / "resources" / "frynetworks_logo.ico"
+            icon_path = base_path / "resources" / "fryhub.ico"
         else:
-            icon_path = Path(__file__).parent / "resources" / "frynetworks_logo.ico"
+            icon_path = Path(__file__).parent / "resources" / "fryhub.ico"
         
         if icon_path.exists():
             app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
+        # Phase 3b: Hub self-update check deferred to post-show (was blocking 0-5s network I/O)
 
         _slog.info("About to create FryNetworksInstallerWindow")
         window = FryNetworksInstallerWindow()
         window._quiet_mode = getattr(args, 'quiet', False)
         _slog.info("FryNetworksInstallerWindow created successfully (quiet=%s)", window._quiet_mode)
         
-        # Connect the local server to handle quit requests from new instances
+        # Connect the local server to handle requests from new instances
         def handle_new_connection():
             """Handle connection from a new instance trying to start."""
             client_socket = local_server.nextPendingConnection()
             if client_socket:
                 def read_data():
                     data = client_socket.readAll()
-                    if data and b"QUIT" in bytes(data):
-                        # New instance is asking us to quit
-                        print("New installer instance detected - exiting old instance...")
+                    raw = bytes(data)
+                    if b"QUIT" in raw:
+                        # Upgrade path: new instance is replacing us
+                        _slog.info("IPC: received QUIT — exiting for upgrade")
                         window._allow_close = True
                         tray = getattr(window, '_tray_icon', None)
                         if tray:
                             tray.hide()
                         window.close()
                         app.quit()
+                    elif b"SHOW" in raw:
+                        # Normal relaunch: bring existing instance to front
+                        _slog.info("IPC: received SHOW — restoring from tray")
+                        window.show()
+                        window.raise_()
+                        window.activateWindow()
                     client_socket.disconnectFromServer()
-                
+
                 client_socket.readyRead.connect(read_data)
                 # Also read immediately in case data already arrived
                 if client_socket.bytesAvailable() > 0:
@@ -471,13 +606,11 @@ def launch_gui(args):
 
         _slog.info("Calling window.show()")
         window.show()
-        # Dismiss PyInstaller splash now that main window is visible
         try:
-            import pyi_splash
-            pyi_splash.update_text('Starting installer...')
-            pyi_splash.close()
-        except ImportError:
-            pass  # not a frozen PyInstaller bundle (dev mode)
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                _sf.write(f"=== window.show() @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+        except Exception as e:
+            _slog.debug("window.show() activation log write failed: %s", e)
         _slog.info(f"window.show() returned — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"windowHandle={'exists' if window.windowHandle() else 'None'}")
@@ -498,10 +631,81 @@ def launch_gui(args):
             except Exception as e:
                 _slog.warning(f"SetForegroundWindow failed: {e}")
 
+        try:
+            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                _sf.write(f"=== window activated @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+        except Exception:
+            pass
         _slog.info(f"Post-activation — isVisible={window.isVisible()}, "
                     f"isMinimized={window.isMinimized()}, "
                     f"pos=({window.x()},{window.y()}), "
                     f"size=({window.width()}x{window.height()})")
+
+        # Phase 3b: Hub self-update check — deferred to post-show so window is visible first
+        QtCore.QTimer.singleShot(200, lambda: _attempt_hub_update_check(args, window))
+
+        # Close Qt splash synchronously now that the window is visible + activated.
+        # Previous design used QTimer.singleShot(150, ...) but the timer fires on event-loop
+        # entry, which can be 10-30s later if deferred init blocks app.exec(). Sync close
+        # here ensures the splash dismisses as soon as the window is on screen.
+        if _qt_splash is not None:
+            try:
+                # Aggressive hide first; finish()/close() are sometimes no-op on
+                # Windows if the native window is not yet fully mapped (#race).
+                _qt_splash.hide()
+                _qt_splash.finish(window)
+                # Single processEvents() call to ensure paint completes before we continue
+                app.processEvents()
+                _slog.info("app.processEvents() after splash finish — returned")
+                try:
+                    _qt_splash.close()
+                except Exception:
+                    pass
+                try:
+                    _qt_splash.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                        _sf.write(f"=== Qt splash CLOSE @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+                except Exception:
+                    pass
+            finally:
+                _qt_splash = None
+        _slog.info("Splash cleanup complete")
+
+        # Cleanup on app exit: release single-instance mutex, close local server, hide tray.
+        # Without this, the mutex persists if the QApplication stays alive via tray, and
+        # subsequent Hub launches see a stale mutex.
+        def _on_about_to_quit():
+            global _HUB_INSTANCE_MUTEX
+            try:
+                if _HUB_INSTANCE_MUTEX:
+                    import ctypes
+                    ctypes.windll.kernel32.CloseHandle(_HUB_INSTANCE_MUTEX)
+                    _HUB_INSTANCE_MUTEX = None
+            except Exception:
+                pass
+            try:
+                local_server.close()
+            except Exception:
+                pass
+            try:
+                # Hide tray if window has one. Window may already be destroyed.
+                tray = getattr(window, 'tray_icon', None) or getattr(window, '_tray_icon', None)
+                if tray is not None:
+                    tray.hide()
+            except Exception:
+                pass
+            try:
+                with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _sf:
+                    _sf.write(f"=== aboutToQuit cleanup @ {__import__('datetime').datetime.now().isoformat()} ===\n")
+            except Exception:
+                pass
+        _slog.info("_on_about_to_quit handler defined")
+        app.aboutToQuit.connect(_on_about_to_quit)
+        _slog.info("aboutToQuit handler connected")
+
         _slog.info("Entering app.exec() event loop")
 
         return app.exec()
@@ -580,9 +784,9 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
         # Detect external IP for all miners (used for lease and device distribution tracking)
         try:
             external_ip = get_external_ip()
-            print(f"🌐 Detected external IP: {external_ip}")
+            print(f"[NET] Detected external IP: {external_ip}")
         except Exception as e:
-            print(f"⚠ Could not detect external IP: {e}")
+            print(f"[WARN] Could not detect external IP: {e}")
 
         # Check if this miner type has IP enforcement enabled
         if miner_code:
@@ -668,7 +872,7 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
         active = lease_status.get("active", False)
         holder_install_id = lease_status.get("holder_install_id")
 
-        print(f"🔍 Checking lease status for {miner_key}...")
+        print(f"[SCAN] Checking lease status for {miner_key}...")
 
         if active and holder_install_id and holder_install_id != install_id:
             # Another device holds an active lease
@@ -682,17 +886,17 @@ def acquire_miner_lease(api_client: ExternalApiClient, miner_key: str, install_i
 
         elif not active and holder_install_id and holder_install_id != install_id:
             # Another device holds lease but it's inactive - can be taken over
-            print(f"⚠ Found inactive lease held by {holder_install_id}")
-            print("🔄 Lease is available for takeover (device migration)")
+            print(f"[WARN] Found inactive lease held by {holder_install_id}")
+            print("[SWAP] Lease is available for takeover (device migration)")
 
         # Try to acquire the lease
-        print(f"🔐 Acquiring lease for {miner_key}...")
+        print(f"[LOCK] Acquiring lease for {miner_key}...")
         lease_result = api_client.acquire_installation_lease(miner_key, install_id, lease_seconds=3600, external_ip=external_ip)
         lease_granted = lease_result.get("granted", False) if isinstance(lease_result, dict) else bool(lease_result)
         error_code = lease_result.get("error_code") if isinstance(lease_result, dict) else None
 
         if lease_granted:
-            print(f"✅ Lease acquired successfully")
+            print(f"[OK] Lease acquired successfully")
             return {
                 "success": True,
                 "message": "Lease acquired - installation can proceed",
@@ -744,7 +948,7 @@ def install_miner(args):
 
     # Check for conflicts with External API
     api_client = get_external_api_client()
-    print(f"✓ External API connected: {api_client.base_url}")
+    print(f"[OK] External API connected: {api_client.base_url}")
     
     detector = ConflictDetector(api_client=api_client)
     conflicts = detector.check_device_conflicts(args.key)
@@ -771,28 +975,28 @@ def install_miner(args):
     
     # Acquire lease for the miner key
     install_id = _get_install_id()
-    print(f"\\n🔐 Lease Acquisition Phase")
+    print(f"\\n[LOCK] Lease Acquisition Phase")
     print(f"Install ID: {install_id}")
     
     lease_result = acquire_miner_lease(api_client, args.key, install_id, miner_code=key_info["code"])
     
     if not lease_result["success"]:
-        print(f"\\n❌ Lease acquisition failed:")
+        print(f"\\n[FAIL] Lease acquisition failed:")
         print(f"  Error: {lease_result['message']}")
         
         if lease_result.get("resolution"):
             print(f"  Solution: {lease_result['resolution']}")
         
         if lease_result.get("error") == "active_lease_held":
-            print(f"\\n📱 Another device is actively using this miner key.")
+            print(f"\\n[DEV] Another device is actively using this miner key.")
             print(f"   Holder: {lease_result.get('holder_install_id', 'Unknown')}")
             print(f"   Action: Stop the miner on the other device first.")
         
         return 1
     
-    print(f"\\n✅ {lease_result['message']}")
+    print(f"\\n[OK] {lease_result['message']}")
     if lease_result.get("takeover"):
-        print("🔄 This installation will take over from an inactive device")
+        print("[SWAP] This installation will take over from an inactive device")
     
     # Setup configuration
     config_manager = ConfigManager(key_info["code"])
@@ -842,7 +1046,7 @@ def install_miner(args):
     )
 
     if install_result["success"]:
-        print(f"✓ {install_result['message']}")
+        print(f"[OK] {install_result['message']}")
         for action in install_result.get("actions", []):
             print(f"  • {action}")
 
@@ -865,7 +1069,7 @@ def install_miner(args):
                 nssm_path = base_dir / "nssm.exe"
 
                 if not nssm_path.exists():
-                    print("✗ MystNodes SDK provisioning skipped — nssm.exe missing")
+                    print("[FAIL] MystNodes SDK provisioning skipped — nssm.exe missing")
                     return 1
 
                 # Legacy Mysterium teardown (Fix #2b) — must run before SDK provisioning
@@ -876,10 +1080,10 @@ def install_miner(args):
                     progress_callback=lambda msg: print(f"  {msg}"),
                 )
                 if upgrade_result.failed:
-                    print(f"✗ Legacy Mysterium upgrade failed: {upgrade_result.error}")
+                    print(f"[FAIL] Legacy Mysterium upgrade failed: {upgrade_result.error}")
                     return 1
                 if upgrade_result.upgrade_performed:
-                    print("✓ Legacy Mysterium teardown complete")
+                    print("[OK] Legacy Mysterium teardown complete")
 
                 print("→ Provisioning MystNodes SDK Client...")
                 result = provision_mystnodes_sdk_at_install(
@@ -888,14 +1092,14 @@ def install_miner(args):
                     progress_callback=lambda label, status: print(f"  [{label}] {status}"),
                 )
                 if not result.success:
-                    print(f"✗ MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
+                    print(f"[FAIL] MystNodes SDK provisioning failed at step '{result.step}': {result.error}")
                     cleanup_mystnodes_sdk_on_failure(base_dir, nssm_path)
                     return 1
-                print("✓ MystNodes SDK provisioning complete")
+                print("[OK] MystNodes SDK provisioning complete")
 
         return 0
     else:
-        print(f"✗ {install_result['message']}")
+        print(f"[FAIL] {install_result['message']}")
         return 1
 
 
@@ -909,10 +1113,10 @@ def handle_validate(args):
     result = parser.parse_miner_key(args.key)
     
     if not result["valid"]:
-        print(f"✗ Invalid key format: {result['error']}")
+        print(f"[FAIL] Invalid key format: {result['error']}")
         return 1
     
-    print(f"✓ Valid {result['name']} key format")
+    print(f"[OK] Valid {result['name']} key format")
     print(f"  Code: {result['code']}")
     print(f"  Group: {result['group']}")
     if result["exclusive"]:
@@ -922,11 +1126,11 @@ def handle_validate(args):
     try:
         api_client = get_external_api_client()
         
-        print(f"\\n🔍 Validating with External API...")
+        print(f"\\n[SCAN] Validating with External API...")
         miner_profile = api_client.get_miner_profile(args.key)
         
         if miner_profile.get("exists", False):
-            print(f"✓ Miner key exists in system")
+            print(f"[OK] Miner key exists in system")
             
             # Show additional profile info if available
             if miner_profile.get("registered_mac"):
@@ -935,34 +1139,34 @@ def handle_validate(args):
                 print(f"  Hex ID: {miner_profile['hex_id']}")
                 
         else:
-            print(f"✗ Miner key does not exist in system")
+            print(f"[FAIL] Miner key does not exist in system")
             print("  Contact support or verify the key is correct")
             return 1
             
     except Exception as e:
-        print(f"✗ External API validation failed: {e}")
+        print(f"[FAIL] External API validation failed: {e}")
         print("  Check network connection and API availability")
         return 1
     
     # Check conflicts if requested
     if args.check_conflicts:
-        print("\\n🔍 Checking for conflicts...")
+        print("\\n[SCAN] Checking for conflicts...")
         try:
             detector = ConflictDetector(api_client)
             conflicts = detector.check_device_conflicts(args.key)
             
             if conflicts.get("error"):
-                print(f"✗ Validation error: {conflicts['error']}")
+                print(f"[FAIL] Validation error: {conflicts['error']}")
                 return 1
             elif conflicts.get("has_conflicts"):
-                print("⚠ Conflicts detected:")
+                print("[WARN] Conflicts detected:")
                 for detail in conflicts["details"]:
-                    severity_icon = "🔥" if detail["severity"] == "error" else "⚠"
+                    severity_icon = "[ERR]" if detail["severity"] == "error" else "[WARN]"
                     print(f"  {severity_icon} {detail['message']}")
             else:
-                print("✓ No conflicts detected - ready for installation")
+                print("[OK] No conflicts detected - ready for installation")
         except Exception as e:
-            print(f"✗ Conflict check failed: {e}")
+            print(f"[FAIL] Conflict check failed: {e}")
             return 1
     
     return 0
@@ -999,19 +1203,19 @@ def handle_service(args):
         
     elif args.action == "start":
         result = service_manager.start_service()
-        print(f"{'✓' if result['success'] else '✗'} {result['message']}")
+        print(f"{'[OK]' if result['success'] else '[FAIL]'} {result['message']}")
         
     elif args.action == "stop":
         result = service_manager.stop_service()
-        print(f"{'✓' if result['success'] else '✗'} {result['message']}")
+        print(f"{'[OK]' if result['success'] else '[FAIL]'} {result['message']}")
         
     elif args.action == "restart":
         stop_result = service_manager.stop_service()
         if stop_result["success"]:
             start_result = service_manager.start_service()
-            print(f"{'✓' if start_result['success'] else '✗'} Service restarted")
+            print(f"{'[OK]' if start_result['success'] else '[FAIL]'} Service restarted")
         else:
-            print(f"✗ Failed to stop service: {stop_result['message']}")
+            print(f"[FAIL] Failed to stop service: {stop_result['message']}")
             
     elif args.action == "logs":
         logs = service_manager.get_service_logs(args.lines)
@@ -1025,34 +1229,107 @@ def handle_service(args):
     return 0
 
 
-def handle_uninstall(args):
-    """Handle uninstall command."""
+def _uninstall_single(miner_code: str, system_wide: bool, remove_data: bool):
+    """Uninstall one miner. Extracted for --all iteration."""
     from core.service_manager import ServiceManager
     from core.config_manager import ConfigManager
-    
-    print(f"Uninstalling {args.miner_code} miner...")
-    
-    # Stop and remove service
-    service_manager = ServiceManager(args.miner_code)
+
+    service_manager = ServiceManager(miner_code)
     result = service_manager.uninstall_service()
-    
     if result["success"]:
-        print(f"✓ {result['message']}")
+        print(f"[OK] {result['message']}")
         for action in result.get("actions", []):
             print(f"  • {action}")
     else:
-        print(f"⚠ Service removal: {result['message']}")
-    
-    # Remove configuration if requested
-    if args.remove_data:
-        config_manager = ConfigManager(args.miner_code)
-        config_result = config_manager.remove_configuration(args.system_wide)
-        
+        print(f"[WARN] Service removal: {result['message']}")
+
+    if remove_data:
+        config_manager = ConfigManager(miner_code)
+        config_result = config_manager.remove_configuration(system_wide)
         if config_result["success"]:
-            print("✓ Configuration and data removed")
+            print("[OK] Configuration and data removed")
         else:
-            print(f"⚠ Configuration removal failed: {config_result['errors']}")
-    
+            print(f"[WARN] Configuration removal failed: {config_result['errors']}")
+
+
+def _remove_updater_task():
+    """Remove FryNetworksUpdater scheduled task. No-op if not found."""
+    if os.name != 'nt':
+        return
+    result = subprocess.run(
+        ["schtasks", "/delete", "/tn", "FryNetworksUpdater", "/f"],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print("[OK] FryNetworksUpdater scheduled task removed")
+    else:
+        print("  (FryNetworksUpdater task not found or already removed)")
+
+
+def _remove_hub_data_root():
+    """Remove %PROGRAMDATA%\\FryNetworks root when --all --remove-data.
+
+    Called AFTER all per-miner removals complete. Per-miner uninstall removes
+    its own subdir; this removes the rest (hub_config, cache, updater dir).
+    """
+    import shutil
+    root = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "FryNetworks"
+    if root.exists():
+        try:
+            shutil.rmtree(root)
+            print(f"[OK] Removed {root}")
+        except Exception as exc:
+            print(f"[WARN] Could not remove {root}: {exc}")
+
+
+def handle_uninstall(args):
+    """Handle uninstall command."""
+    from core.config_manager import ConfigManager
+
+    if args.uninstall_all:
+        config_manager = ConfigManager()
+        installations = config_manager.detect_existing_installations()
+        if not installations:
+            print("No miner installations found — nothing to uninstall")
+            return 0
+
+        # Destructive confirmation for --all --remove-data unless -y
+        if args.remove_data and not args.yes:
+            print("This will remove ALL miner installations AND wipe %PROGRAMDATA%\\FryNetworks\\.")
+            print("Type 'yes' to continue, anything else to abort:")
+            if input().strip().lower() != 'yes':
+                print("Aborted.")
+                return 1
+
+        print(f"Uninstalling {len(installations)} miner(s)...")
+        failures = []
+        for install in installations:
+            code = install["miner_code"]
+            sw = install["system_wide"]  # per-install, NOT from CLI --system-wide
+            print(f"\n--- {code} ({'system' if sw else 'user'}) ---")
+            try:
+                _uninstall_single(code, sw, args.remove_data)
+            except Exception as e:
+                print(f"[WARN] Failed to uninstall {code}: {e}")
+                failures.append((code, str(e)))
+
+        # Scheduled task removal AFTER all miners
+        _remove_updater_task()
+
+        # Hub data root removal AFTER per-miner removals, BEFORE return
+        if args.remove_data:
+            _remove_hub_data_root()
+
+        if failures:
+            print(f"\n[WARN] {len(failures)} miner(s) failed to uninstall:")
+            for code, err in failures:
+                print(f"  • {code}: {err}")
+            return 1
+        return 0
+
+    # Single miner (existing path, unchanged)
+    print(f"Uninstalling {args.miner_code} miner...")
+    _uninstall_single(args.miner_code, args.system_wide, args.remove_data)
     return 0
 
 
