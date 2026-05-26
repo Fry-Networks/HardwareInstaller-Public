@@ -344,6 +344,62 @@ def show_version_info():
     print("="*60 + "\n")
 
 
+def _upload_github_release(
+    version: str,
+    exe_path: Path,
+    *,
+    min_required: Optional[str] = None,
+) -> None:
+    """Update fryhub_version.json and create a GitHub Release.
+
+    Steps:
+      1. Compute SHA-256 of the built setup exe.
+      2. Update fryhub_version.json in repo root.
+      3. Create GitHub Release via ``gh release create``.
+    """
+    if not exe_path.exists():
+        raise FileNotFoundError(f"Setup exe not found: {exe_path}")
+
+    sha = hashlib.sha256(exe_path.read_bytes()).hexdigest().upper()
+    tag = f"v{version}"
+    download_url = (
+        "https://github.com/Fry-Foundation/HardwareInstaller-Public/"
+        f"releases/download/{tag}/FryHubSetup-{version}.exe"
+    )
+
+    manifest = {
+        "manifest_version": "1.0.0",
+        "hub_version": version,
+        "setup_url": download_url,
+        "setup_sha256": sha,
+    }
+    if min_required:
+        manifest["min_required"] = min_required
+
+    manifest_path = Path(__file__).parent / "fryhub_version.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"[GitHub] Updated {manifest_path} (SHA256={sha[:16]}...)")
+
+    # Create release via gh CLI
+    result = subprocess.run(
+        [
+            "gh", "release", "create", tag,
+            str(exe_path),
+            "--title", f"Fry Hub {tag}",
+            "--notes", f"Fry Hub {version} release.",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[GitHub] gh release create stderr: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"gh release create failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    print(f"[GitHub] Release created: {tag}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fry Hub Build Tool",
@@ -419,16 +475,22 @@ Examples:
         action="store_true",
         help="On Windows, also build an Inno Setup installer after building the EXE"
     )
+    parser.add_argument(
+        "--upload-github",
+        action="store_true",
+        help="Create GitHub Release and update fryhub_version.json manifest"
+    )
+    # Deprecated — kept for backward compat; use --upload-github instead
     bunny_grp = parser.add_mutually_exclusive_group()
     bunny_grp.add_argument(
         "--upload-hub",
         action="store_true",
-        help="Upload dist/FryHubSetup-{ver}.exe to Bunny CDN"
+        help="(Deprecated) Upload dist/FryHubSetup-{ver}.exe to Bunny CDN"
     )
     bunny_grp.add_argument(
         "--rollback-hub",
         metavar="VERSION",
-        help="Rollback Hub manifest to point at archived VERSION"
+        help="(Deprecated) Rollback Hub manifest to point at archived VERSION"
     )
     parser.add_argument(
         "--min-required",
@@ -539,7 +601,17 @@ Examples:
             except Exception as e:
                 print(f"Inno build failed: {e}")
                 build_failures.append("Inno")
+        if args.upload_github:
+            exe_name = f"FryHubSetup-{target_version}.exe"
+            exe_path = Path("dist") / exe_name
+            try:
+                _upload_github_release(target_version, exe_path,
+                                       min_required=args.min_required)
+            except Exception as e:
+                print(f"GitHub release failed: {e}", file=sys.stderr)
+                build_failures.append("GitHubRelease")
         if args.upload_hub:
+            # Deprecated: Bunny CDN upload
             from tools.bunny_upload import upload_hub
             exe_name = f"FryHubSetup-{target_version}.exe"
             exe_path = Path("dist") / exe_name

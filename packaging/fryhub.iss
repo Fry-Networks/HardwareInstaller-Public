@@ -44,10 +44,6 @@ Source: "..\dist\frynetworks_installer_v{#AppVersion}.exe"; \
   DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 Source: "..\tools\register_updater_task.ps1"; \
   DestDir: "{app}\tools"; Flags: ignoreversion
-; Updater exe — built by build_cli.py separately.
-Source: "..\dist\frynetworks_updater.exe"; \
-  DestDir: "{app}"; DestName: "frynetworks_updater.exe"; \
-  Flags: ignoreversion
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
@@ -68,7 +64,7 @@ Root: HKLM; Subkey: "Software\FryNetworks"; ValueType: string; \
 [Run]
 ; Register the FryNetworksUpdater scheduled task. Idempotent per recon.
 Filename: "powershell.exe"; \
-  Parameters: "-ExecutionPolicy Bypass -File ""{app}\tools\register_updater_task.ps1"" -UpdaterPath ""{app}\frynetworks_updater.exe"""; \
+  Parameters: "-ExecutionPolicy Bypass -File ""{app}\tools\register_updater_task.ps1"" -UpdaterPath ""{app}\{#AppExeName}"""; \
   Flags: runhidden waituntilterminated; \
   StatusMsg: "Registering updater scheduled task..."
 

@@ -1,16 +1,16 @@
 """
-Miner registry loader with CDN fetch, disk cache, and bundled fallback.
+Miner registry loader with remote fetch, disk cache, and bundled fallback.
 
 Provides two entry points:
 
 - ``load_local_registry()``  — import-time loader; reads disk cache then
   bundled JSON.  **No network I/O.**  Never raises.
-- ``refresh_from_cdn()``     — foreground CDN fetch with SHA-256 envelope
-  verification.  Writes result to disk cache on success.  Returns the
-  registry dict or ``None`` on any failure.
+- ``refresh_from_remote()``  — foreground fetch from GitHub with
+  schema_version validation.  Writes result to disk cache on success.
+  Returns the registry dict or ``None`` on any failure.
 
 Fallback chain (both entry points combined):
-  CDN (3 s timeout) → disk cache → bundled JSON.
+  GitHub (3 s timeout) → disk cache → bundled JSON.
 
 Cache location: ``C:\\ProgramData\\FryNetworks\\cache\\miner_registry.json``
 Atomic write: ``.json.tmp`` + ``os.replace`` (matches tools/updater.py:452-454).
@@ -18,7 +18,6 @@ Atomic write: ``.json.tmp`` + ``os.replace`` (matches tools/updater.py:452-454).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -32,8 +31,9 @@ _logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_CDN_REGISTRY_URL = (
-    "https://frynetworks-downloads.b-cdn.net/frynetworks-installer/manifest/v1/registry.json"
+_REGISTRY_URL = (
+    "https://raw.githubusercontent.com/Fry-Foundation/"
+    "HardwareInstaller-Public/main/core/miner_registry.json"
 )
 
 _CACHE_DIR = Path(r"C:\ProgramData\FryNetworks\cache")
@@ -101,59 +101,32 @@ def _write_cache(registry: Dict[str, Any]) -> None:
         _logger.warning("Cache write failed: %s", exc)
 
 
-def _compute_sha256_str(data: str) -> str:
-    """Return the hex SHA-256 digest of *data* (UTF-8 encoded)."""
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()
-
-
-def _fetch_envelope(url: str, timeout: int) -> Optional[Dict[str, Any]]:
-    """Fetch the integrity envelope from *url*.  Returns parsed dict or None."""
+def _fetch_registry(url: str, timeout: int) -> Optional[Dict[str, Any]]:
+    """Fetch registry JSON from *url*.  Returns parsed dict or None."""
     try:
         import urllib.request  # deferred: keep import-time path network-free
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-        return json.loads(raw)
+            data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        _logger.debug("CDN fetch failed (%s): %s", url, exc)
+        _logger.debug("Registry fetch failed (%s): %s", url, exc)
         return None
 
-
-def _verify_envelope(envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Verify the SHA-256 integrity of *envelope*.
-
-    Returns the inner ``registry`` dict on success, or None on failure.
-    """
-    expected_sha = envelope.get("sha256")
-    registry = envelope.get("registry")
-
-    if not expected_sha or not isinstance(registry, dict):
-        _logger.debug("Envelope missing sha256 or registry field")
+    if not isinstance(data, dict):
         return None
 
-    canonical = json.dumps(registry, sort_keys=True, separators=(",", ":"))
-    actual_sha = _compute_sha256_str(canonical)
-
-    if expected_sha.lower() != actual_sha.lower():
+    if not _validate_schema_version(data):
         _logger.warning(
-            "SHA-256 mismatch: expected %s, got %s",
-            expected_sha[:16] + "...",
-            actual_sha[:16] + "...",
+            "Remote registry has unsupported schema_version: %s",
+            data.get("schema_version"),
         )
         return None
 
-    if not _validate_schema_version(registry):
-        _logger.warning(
-            "CDN registry has unsupported schema_version: %s",
-            registry.get("schema_version"),
-        )
+    if "miners" not in data:
+        _logger.debug("Remote registry missing 'miners' key")
         return None
 
-    if "miners" not in registry:
-        _logger.debug("CDN registry missing 'miners' key")
-        return None
-
-    return registry
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -182,25 +155,25 @@ def load_local_registry() -> Dict[str, Any]:
         return {"schema_version": 1, "miners": []}
 
 
-def refresh_from_cdn(
+def refresh_from_remote(
     url: Optional[str] = None,
     timeout: int = 3,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch registry from CDN, verify SHA-256, and update disk cache.
+    """Fetch registry from GitHub, validate schema, and update disk cache.
 
     Returns the registry dict on success, or ``None`` on any failure.
     Worst-case latency: *timeout* seconds (broken DNS / partial connectivity).
     Confirmed-offline (adapter disabled) typically returns immediately.
     """
-    target = url or _CDN_REGISTRY_URL
+    target = url or _REGISTRY_URL
 
-    envelope = _fetch_envelope(target, timeout)
-    if envelope is None:
-        return None
-
-    registry = _verify_envelope(envelope)
+    registry = _fetch_registry(target, timeout)
     if registry is None:
         return None
 
     _write_cache(registry)
     return registry
+
+
+# Backward-compat alias (callers may still reference old name)
+refresh_from_cdn = refresh_from_remote
