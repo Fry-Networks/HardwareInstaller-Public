@@ -210,24 +210,6 @@ Write-Host "`n[4/5] Cleaning previous builds..." -ForegroundColor Yellow
 Remove-Item -Force -Recurse build,dist -ErrorAction SilentlyContinue
 Write-Host "  [OK] Build directories cleaned" -ForegroundColor Green
 
-# Build updater first so MSI bundling finds it in dist\
-Write-Host "`n[5a/5] Building updater with PyInstaller..." -ForegroundColor Yellow
-try {
-    py -m PyInstaller `
-        --onefile `
-        --noconsole `
-        --paths "." `
-        --icon "resources\fryhub.ico" `
-        --name frynetworks_updater `
-        tools\updater.py
-    if (-not (Test-Path "dist\frynetworks_updater.exe")) { throw "updater.exe not found after build" }
-    Write-Host "  [OK] updater built: dist\frynetworks_updater.exe" -ForegroundColor Green
-} catch {
-    Write-Host "`n[FAIL] Updater build failed" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    exit 1
-}
-
 # Regenerate version_info.txt so the binary embeds correct metadata
 $VersionParts = $Version -split '\.' | ForEach-Object { [int]$_ }
 while ($VersionParts.Length -lt 4) { $VersionParts += 0 }
@@ -293,6 +275,9 @@ try {
         --hidden-import "core.conflict_detector" `
         --hidden-import "core.naming" `
         --hidden-import "core.key_parser" `
+        --hidden-import "serial" `
+        --hidden-import "serial.tools" `
+        --hidden-import "serial.tools.list_ports" `
         --collect-submodules "core" `
         --icon "resources\fryhub.ico" `
         --version-file "resources\version_info.txt" `
@@ -303,7 +288,6 @@ try {
         --add-data "resources\embedded;resources\embedded" `
         --add-data "SDK;SDK" `
         --add-data "core;core" `
-        --add-data "dist\frynetworks_updater.exe;." `
         --exclude-module numpy `
         --exclude-module PIL `
         --exclude-module Pillow `
@@ -326,6 +310,18 @@ try {
         Write-Host "`nTo test the installer:" -ForegroundColor Cyan
         Write-Host "  cd dist" -ForegroundColor White
         Write-Host "  .\$ExeName.exe --gui" -ForegroundColor White
+        # Update fryhub_version.json with the built exe SHA256
+        $ManifestPath = Join-Path $InstallerDir "fryhub_version.json"
+        if (Test-Path $ManifestPath) {
+            $ExeHash = (Get-FileHash "dist\$ExeName.exe" -Algorithm SHA256).Hash
+            $DownloadUrl = "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases/download/v$Version/FryHubSetup-$Version.exe"
+            $ManifestObj = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+            $ManifestObj.hub_version = $Version
+            $ManifestObj.setup_sha256 = $ExeHash
+            $ManifestObj.setup_url = $DownloadUrl
+            $ManifestObj | ConvertTo-Json -Depth 4 | Set-Content $ManifestPath -Encoding UTF8
+            Write-Host "`n  [OK] Updated fryhub_version.json (SHA256=$($ExeHash.Substring(0,16))...)" -ForegroundColor Green
+        }
     } else { throw "Build completed but executable not found" }
 } catch {
     Write-Host "`n[FAIL] Build failed" -ForegroundColor Red

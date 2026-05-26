@@ -2380,9 +2380,10 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             current_poc = config.get('poc_version')
             required_poc = latest.get('poc_version')
 
-            if required_gui and current_gui and current_gui != "Unknown" and current_gui != required_gui:
+            from core.hub_updater import _compare_versions
+            if required_gui and current_gui and current_gui != "Unknown" and _compare_versions(required_gui, current_gui) != 0:
                 warnings.append(f"{miner_name}: GUI {current_gui} \u2192 {required_gui}")
-            if required_poc and current_poc and current_poc != "Unknown" and current_poc != required_poc:
+            if required_poc and current_poc and current_poc != "Unknown" and _compare_versions(required_poc, current_poc) != 0:
                 warnings.append(f"{miner_name}: PoC {current_poc} \u2192 {required_poc}")
         return warnings
     
@@ -2412,19 +2413,21 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         label = getattr(self, 'version_warning_label', None)
         if not label:
             return
+        try:
+            if not warnings:
+                label.clear()
+                label.setVisible(False)
+                return
 
-        if not warnings:
-            label.clear()
-            label.setVisible(False)
+            # Show a simple, non-detailed warning to avoid clutter on the main page
+            icon_src = self._get_warning_icon_data_url()
+            if icon_src:
+                label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Miner updates available</b>')
+            else:
+                label.setText("<b>Miner updates available</b>")
+            label.setVisible(True)
+        except RuntimeError:
             return
-
-        # Show a simple, non-detailed warning to avoid clutter on the main page
-        icon_src = self._get_warning_icon_data_url()
-        if icon_src:
-            label.setText(f'<img src="{icon_src}" width="20" height="20" style="vertical-align:middle; margin-right:6px;"> <b>Miner updates available</b>')
-        else:
-            label.setText("<b>Miner updates available</b>")
-        label.setVisible(True)
 
     def _handle_version_warning_update(self, warnings: Optional[List[str]]) -> None:
         """Update cached warnings, label, and tray notifications."""
@@ -4056,36 +4059,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             # Source run: __file__ is gui/installer_window.py; app root is parent of gui/
             return Path(__file__).resolve().parent.parent
 
-    def _enable_updater_task(self) -> tuple[bool, str]:
-        """Register FryNetworksUpdater scheduled task using bundled PS1."""
-        try:
-            ps1_path = self._app_root() / "tools" / "register_updater_task.ps1"
-            if not ps1_path.exists():
-                return False, f"register_updater_task.ps1 not found at {ps1_path}"
-            result = subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(ps1_path)],
-                capture_output=True, text=True, timeout=30, check=False,
-            )
-            if result.returncode != 0:
-                return False, f"Task register failed: {result.stderr or result.stdout or 'unknown'}"
-            return True, "Updater task registered."
-        except Exception as exc:
-            return False, f"Task register exception: {exc}"
-
-    def _disable_updater_task(self) -> tuple[bool, str]:
-        """Remove FryNetworksUpdater scheduled task. Idempotent."""
-        try:
-            result = subprocess.run(
-                ["schtasks", "/Delete", "/TN", r"\FryNetworks\FryNetworksUpdater", "/F"],
-                capture_output=True, text=True, timeout=10, check=False,
-            )
-            # rc=0 on success or task-not-found (silently ignored by /F)
-            if result.returncode != 0 and "Cannot find the file" not in (result.stderr or ""):
-                return False, f"Task delete failed: {result.stderr or result.stdout or 'unknown'}"
-            return True, "Updater task removed."
-        except Exception as exc:
-            return False, f"Task delete exception: {exc}"
-
     def _toggle_autoupdate(self, checked: bool) -> None:
         try:
             from core.hub_config import read_hub_config, write_hub_config
@@ -4102,13 +4075,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 self._tray_autoupdate_action.setChecked(not checked)
             return
 
-        if checked:
-            ok, msg = self._enable_updater_task()
-        else:
-            ok, msg = self._disable_updater_task()
-        if not ok:
-            LOGGER.warning("Updater task toggle failed: %s", msg)
-            # Do not crash UI; log and continue
+        LOGGER.info("auto_update_hub set to %s", checked)
 
     def _show_hub_settings_dialog(self) -> None:
         # Singleton: if dialog already open, raise it
@@ -4169,25 +4136,20 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             self._hub_settings_dialog = None
 
     def _check_for_updates_clicked(self) -> None:
-        """Shell out to the installed updater with stage-text modal progress."""
+        """Inline Hub self-update check using shared core/hub_updater utilities."""
         from pathlib import Path
         from version import WINDOWS_VERSION
-        updater_path = Path(
-            os.environ.get('PROGRAMDATA', r'C:\ProgramData')
-        ) / 'FryNetworks' / 'updater' / 'frynetworks_updater.exe'
-
-        if not updater_path.exists():
-            QtWidgets.QMessageBox.warning(
-                self, "Check for Updates",
-                f"Updater is not installed at:\n{updater_path}\n\n"
-                "Please re-run the installer to repair the updater component."
-            )
-            try:
-                self._slog.warning(
-                    f"Check for Updates: updater missing at {updater_path}")
-            except Exception:
-                pass
-            return
+        from core.hub_updater import (
+            _fetch_hub_manifest,
+            _compare_versions,
+            _download_hub_setup,
+            _launch_hub_setup_and_exit,
+        )
+        from core.hub_config import read_hub_config, write_hub_config
+        from PySide6 import QtWidgets, QtCore
+        import tempfile
+        import threading
+        from datetime import datetime, timezone
 
         progress = QtWidgets.QProgressDialog(
             "Checking for updates...", None, 0, 0, self)
@@ -4197,73 +4159,78 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         progress.setMinimumDuration(0)
         progress.show()
 
-        stage_observed = {'downloading': False, 'launching': False}
-
-        proc = QtCore.QProcess(self)
-        proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
-
-        def _on_ready_read():
-            try:
-                chunk = bytes(proc.readAllStandardOutput()).decode(
-                    "utf-8", errors="replace")
-            except Exception:
-                chunk = ""
-            if not chunk:
-                return
-            try:
-                self._slog.debug(f"updater stdout: {chunk.strip()}")
-            except Exception:
-                pass
-            low = chunk.lower()
-            if "downloading" in low:
-                progress.setLabelText("Downloading update...")
-                stage_observed['downloading'] = True
-            elif "launching" in low or "starting installer" in low or "running installer" in low:
-                progress.setLabelText("Launching installer...")
-                stage_observed['launching'] = True
-            elif "checking" in low or "querying" in low or "fetching release" in low:
-                progress.setLabelText("Checking for updates...")
-
-        def _on_finished(exit_code, _exit_status):
+        manifest = _fetch_hub_manifest(timeout=5)
+        if manifest is None:
             progress.close()
-            if exit_code == 0:
-                if stage_observed['downloading'] or stage_observed['launching']:
-                    QtWidgets.QMessageBox.information(
-                        self, "Check for Updates",
-                        "An update has been downloaded and the new installer "
-                        "has been launched."
-                    )
-                else:
-                    QtWidgets.QMessageBox.information(
-                        self, "Check for Updates",
-                        f"You are already running the latest version of "
-                        f"Fry Hub (v{WINDOWS_VERSION})."
-                    )
-            else:
-                _EXIT_MSGS = {
-                    2: ("Could not reach update server (Bunny CDN "
-                        "connectivity issue). Check your internet "
-                        "connection and try again."),
-                    3: "Update manifest is invalid. See the updater log for details.",
-                    7: "Could not determine installed version.",
-                }
-                detail = _EXIT_MSGS.get(
-                    exit_code,
-                    f"Updater exited with code {exit_code}.\n\n"
-                    "See the updater log for details.",
+            QtWidgets.QMessageBox.warning(
+                self, "Check for Updates",
+                "Could not reach update server (connectivity issue). "
+                "Check your internet connection and try again."
+            )
+            return
+
+        cmp = _compare_versions(manifest["hub_version"], WINDOWS_VERSION)
+        if cmp <= 0:
+            progress.close()
+            QtWidgets.QMessageBox.information(
+                self, "Check for Updates",
+                f"You are already running the latest version of "
+                f"Fry Hub (v{WINDOWS_VERSION})."
+            )
+            return
+
+        new_ver = manifest["hub_version"]
+        progress.setLabelText("Downloading update...")
+
+        dest = (
+            Path(tempfile.gettempdir())
+            / "FryNetworks"
+            / "hub-update"
+            / f"FryHubSetup-{new_ver}.exe"
+        )
+        config = read_hub_config()
+
+        def _download_worker():
+            try:
+                setup_path = _download_hub_setup(
+                    manifest["setup_url"], dest, manifest["setup_sha256"]
                 )
-                QtWidgets.QMessageBox.warning(
-                    self, "Check for Updates", detail
+            except Exception as exc:
+                try:
+                    self._slog.warning(f"Hub update download failed: {exc}")
+                except Exception:
+                    pass
+                setup_path = None
+            try:
+                QtCore.QTimer.singleShot(
+                    0,
+                    lambda: _on_download_done(setup_path),
                 )
+            except Exception as exc:
                 try:
                     self._slog.warning(
-                        f"frynetworks_updater.exe exited with code {exit_code}")
+                        f"Failed to marshal hub update result: {exc}")
                 except Exception:
                     pass
 
-        proc.readyReadStandardOutput.connect(_on_ready_read)
-        proc.finished.connect(_on_finished)
-        proc.start(str(updater_path), ["--current-version", str(WINDOWS_VERSION)])
+        def _on_download_done(setup_path):
+            if setup_path is None:
+                progress.close()
+                QtWidgets.QMessageBox.warning(
+                    self, "Check for Updates",
+                    "Update download failed or did not pass verification.\n\n"
+                    "Please try again later or download the latest version "
+                    "from fry.farm."
+                )
+                return
+            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
+            config["last_seen_hub_version"] = manifest["hub_version"]
+            config["update_pending"] = True
+            config["update_pending_version"] = manifest["hub_version"]
+            write_hub_config(config)
+            _launch_hub_setup_and_exit(setup_path, config, manifest, window=self)
+
+        threading.Thread(target=_download_worker, daemon=True).start()
 
     def _restore_from_tray(self):
         """Restore window when user selects Show from tray."""
@@ -5270,6 +5237,32 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             self.status_bar.setText("Conflicts detected - click 'Try Another Key' to enter a different miner key")
             return
 
+        # GPS dongle pre-check for satellite miners (ISM)
+        if miner_info and miner_info.get("code") == "ISM":
+            if not getattr(self, '_quiet_mode', False):
+                try:
+                    from core.gps_detector import detect_gps_dongle
+                    gps_result = detect_gps_dongle(timeout_per_port=2.0)
+                    if not gps_result.get("found"):
+                        from PySide6 import QtWidgets as _qw
+                        reply = _qw.QMessageBox.warning(
+                            self, "GPS Receiver Not Detected",
+                            "No GPS/GNSS receiver was detected on this device.\n\n"
+                            "The Indoor Satellite Miner requires a USB GPS dongle "
+                            "to function and earn rewards.\n\n"
+                            "You can still install, but the miner won't operate "
+                            "without GPS hardware.\n\nContinue anyway?",
+                            _qw.QMessageBox.StandardButton.Yes
+                            | _qw.QMessageBox.StandardButton.Cancel,
+                        )
+                        if reply == _qw.QMessageBox.StandardButton.Cancel:
+                            return
+                except Exception as _gps_exc:
+                    try:
+                        self._slog.warning(f"GPS pre-check failed: {_gps_exc}")
+                    except Exception:
+                        pass
+
         # Show progress and concise header
         try:
             self.progress_group.setVisible(True)
@@ -5735,45 +5728,6 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     except Exception as startup_err:
                         self.log_progress(f"[warning] Could not configure GUI autostart: {startup_err}")
                         self._debug_log(f"Startup shortcut creation failed: {startup_err}")
-
-                # ---- Auto-updater scheduled task ----
-                if os.name == 'nt':
-                    try:
-                        import shutil
-                        from pathlib import Path as _UP
-
-                        # Locate bundled updater exe
-                        if getattr(sys, 'frozen', False):
-                            updater_src = _UP(sys._MEIPASS) / 'frynetworks_updater.exe'
-                        else:
-                            updater_src = _UP(__file__).resolve().parent.parent / 'dist' / 'frynetworks_updater.exe'
-
-                        if updater_src.exists():
-                            updater_dest_dir = _UP(os.environ.get('PROGRAMDATA', 'C:\\ProgramData')) / 'FryNetworks' / 'updater'
-                            updater_dest_dir.mkdir(parents=True, exist_ok=True)
-                            updater_dest = updater_dest_dir / 'frynetworks_updater.exe'
-                            shutil.copy2(str(updater_src), str(updater_dest))
-                            self._debug_log(f"Updater exe staged to {updater_dest}")
-
-                            updater_path_escaped = str(updater_dest).replace("'", "''")
-
-                            register_cmd = f'''
-$action = New-ScheduledTaskAction -Execute '{updater_path_escaped}' -Argument '--quiet --update-poc' -WorkingDirectory '{str(updater_dest_dir).replace("'", "''")}'
-$triggerLogon = New-ScheduledTaskTrigger -AtLogOn
-$triggerDaily = New-ScheduledTaskTrigger -Daily -At 2:00AM -RandomDelay (New-TimeSpan -Minutes 30)
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries -StartWhenAvailable
-Register-ScheduledTask -TaskName "FryNetworksUpdater" -TaskPath "\\FryNetworks\\" -Action $action -Trigger $triggerLogon,$triggerDaily -Settings $settings -RunLevel Highest -Force | Out-Null
-'''
-                            subprocess.run(
-                                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', register_cmd],
-                                capture_output=True, timeout=30
-                            )
-                            self.log_progress("Auto-updater scheduled task registered")
-                            self._debug_log("Scheduled task FryNetworksUpdater registered")
-                        else:
-                            self._debug_log(f"Updater exe not found at {updater_src} — skipping task registration")
-                    except Exception as updater_err:
-                        self._debug_log(f"Auto-updater task registration failed: {updater_err}")
 
                 self.update_progress(90, "Finalizing installation...")
                 self.update_progress(100, "Installation completed successfully!")
@@ -6774,7 +6728,6 @@ foreach ($loc in $locations) {{
                     fwm.add_miner_rules(miner_code, miner_dir)
 
         fwm.ensure_olostep_rule()
-        fwm.ensure_updater_rule()
 
         # Rule for the installer EXE itself (only from stable ProgramData path)
         import sys

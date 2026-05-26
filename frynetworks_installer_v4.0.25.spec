@@ -9,7 +9,7 @@ a = Analysis(
     ['installer_main.py'],
     pathex=['.', '.\\core', '.\\gui'],
     binaries=[],
-    datas=[('build_config.json', '.'), ('resources\\background.png', 'resources'), ('resources\\fryhub.ico', 'resources'), ('resources\\frynetworks_logo.ico', 'resources'), ('resources\\embedded', 'resources\\embedded'), ('SDK', 'SDK'), ('core', 'core'), ('dist\\frynetworks_updater.exe', '.')],
+    datas=[('build_config.json', '.'), ('resources\\background.png', 'resources'), ('resources\\fryhub.ico', 'resources'), ('resources\\frynetworks_logo.ico', 'resources'), ('resources\\embedded', 'resources\\embedded'), ('SDK', 'SDK'), ('core', 'core')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

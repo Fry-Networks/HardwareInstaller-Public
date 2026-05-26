@@ -68,6 +68,16 @@ try:
     from tools.banner import TopBanner
     from tools.theme import Theme
     from core.hub_config import hub_config_path, read_hub_config, write_hub_config
+    from core.hub_updater import (
+        _attempt_hub_update_check,
+        _attempt_hub_update_check_inner,
+        _compare_versions,
+        _download_hub_setup,
+        _fetch_hub_manifest,
+        _launch_hub_setup_and_exit,
+        _sha256_file,
+        _threaded_download_and_launch,
+    )
 except ImportError as e:
     print(f"Warning: Failed to import some modules: {e}")
     # Continue anyway - we'll try to import them again later
@@ -95,472 +105,6 @@ def _attempt_registry_refresh() -> None:
         _logger.warning("Registry refresh failed (non-critical): %s", e)
 
 
-# ---------------------------------------------------------------------------
-# Phase 3b — Hub self-update check (launch-time, user-toggleable)
-# ---------------------------------------------------------------------------
-
-_HUB_MANIFEST_URL = (
-    "https://frynetworks-downloads.b-cdn.net/"
-    "frynetworks-installer/hub/latest/fryhub_version.json"
-)
-_HUB_MANIFEST_REQUIRED = ("manifest_version", "hub_version", "setup_url", "setup_sha256")
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _fetch_hub_manifest(timeout: int = 5) -> Optional[dict]:
-    """GET fryhub_version.json from Bunny CDN. Returns None on any failure."""
-    try:
-        req = urllib.request.Request(_HUB_MANIFEST_URL)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        import traceback as _diag2_tb
-        import os as _diag2_os
-        try:
-            _diag2_os.makedirs(r'C:\temp', exist_ok=True)
-            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _diag2_f:
-                _diag2_f.write('=== _fetch_hub_manifest swallow @ ' + __import__('datetime').datetime.now().isoformat() + ' ===\n')
-                _diag2_f.write(_diag2_tb.format_exc())
-                _diag2_f.write('\n')
-        except Exception:
-            pass
-        return None
-    if not isinstance(data, dict):
-        return None
-    for field in _HUB_MANIFEST_REQUIRED:
-        if field not in data or not isinstance(data[field], str):
-            _logger.warning("Hub manifest missing or bad field: %s", field)
-            return None
-    mv = data["manifest_version"]
-    if not mv.startswith("1."):
-        _logger.warning("Unknown hub manifest major version: %s", mv)
-        return None
-    return data
-
-
-def _download_hub_setup(
-    url: str, dest: Path, expected_sha256: str, timeout: int = 120
-) -> Optional[Path]:
-    """Download + sha256-verify the Hub setup exe. Returns dest on success, None on failure."""
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # Dedup: if file already exists with correct hash, skip re-download
-        if dest.exists():
-            if _sha256_file(dest).lower() == expected_sha256.lower():
-                return dest
-            dest.unlink()
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-        actual = _sha256_file(dest)
-        if actual.lower() != expected_sha256.lower():
-            _logger.warning("Hub setup sha256 mismatch: expected=%s got=%s",
-                            expected_sha256, actual)
-            try:
-                dest.unlink()
-            except OSError:
-                pass
-            return None
-        return dest
-    except Exception as exc:
-        _logger.debug("Hub setup download failed: %s", exc)
-        try:
-            if dest.exists():
-                dest.unlink()
-        except OSError:
-            pass
-        return None
-
-
-def _attempt_hub_update_check(args, window=None) -> None:
-    """Launch-time Hub self-update check.
-
-    Contract: returns None on EVERY failure mode.  Hub launch must NEVER fail
-    because this check failed.  Only calls sys.exit(0) on the success path
-    (Inno installer launched cleanly, current process should exit).
-    """
-    try:
-        _attempt_hub_update_check_inner(args, window)
-    except Exception as exc:
-        # DIAG2: capture swallowed exception to file (GUI subsystem hides stdout)
-        import traceback as _diag2_tb
-        import os as _diag2_os
-        try:
-            _diag2_os.makedirs(r'C:\temp', exist_ok=True)
-            with open(r'C:\temp\hub-debug.log', 'a', encoding='utf-8') as _diag2_f:
-                _diag2_f.write('=== _attempt_hub_update_check swallow @ ' + __import__('datetime').datetime.now().isoformat() + ' ===\n')
-                _diag2_f.write(_diag2_tb.format_exc())
-                _diag2_f.write('\n')
-        except Exception as _diag2_write_err:
-            _logger.debug("Hub update diag write failed: %s", _diag2_write_err)
-        _logger.debug("Hub update check failed (%s); continuing", exc)
-
-
-def _attempt_hub_update_check_inner(args, window=None) -> None:
-    # 1. Flag guard
-    if getattr(args, "no_update_check", False):
-        return
-
-    # 2. Race guard — skip if scheduled-task updater is running
-    try:
-        tl = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq frynetworks_updater.exe"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if "frynetworks_updater.exe" in tl.stdout:
-            _logger.debug("Updater running, skipping launch-time hub check")
-            return
-    except Exception as exc:
-        _logger.debug("tasklist check failed (%s); proceeding with check", exc)
-
-    # 3. Read hub config
-    config = read_hub_config()
-
-    # Phase 4 fix: clear stale pending state if local version already matches
-    from version import WINDOWS_VERSION
-    pending_ver = config.get("update_pending_version")
-    if pending_ver and isinstance(pending_ver, str):
-        if _compare_versions(WINDOWS_VERSION, pending_ver) >= 0:
-            config["update_pending"] = False
-            config["update_pending_version"] = None
-            write_hub_config(config)
-
-    # 4. Handle CLI config-persist flags
-    if getattr(args, "auto_update_hub", False):
-        config["auto_update_hub"] = True
-        write_hub_config(config)
-    elif getattr(args, "no_auto_update_hub", False):
-        config["auto_update_hub"] = False
-        write_hub_config(config)
-
-    # 5. Fetch manifest (404 on first-ever deploy = silent no-op)
-    manifest = _fetch_hub_manifest(timeout=5)
-    if manifest is None:
-        return
-
-    # 6. Compare versions
-    cmp = _compare_versions(manifest["hub_version"], WINDOWS_VERSION)
-    if cmp <= 0:
-        return  # no update available
-
-    new_ver = manifest["hub_version"]
-    cur_ver = WINDOWS_VERSION
-    force_update = False
-
-    # 7. Check min_required (optional field)
-    min_req = manifest.get("min_required")
-    if min_req and isinstance(min_req, str):
-        if _compare_versions(cur_ver, min_req) < 0:
-            force_update = True
-
-    # Build download dest path
-    dest = (
-        Path(tempfile.gettempdir())
-        / "FryNetworks"
-        / "hub-update"
-        / f"FryHubSetup-{new_ver}.exe"
-    )
-
-    # 8. Auto-update path (silent, no modal) — offloaded to thread so the event
-    # loop stays responsive during the up-to-120s download.
-    if config.get("auto_update_hub") and not force_update:
-        _threaded_download_and_launch(manifest, dest, config, window)
-        return  # worker marshals result back to main thread when ready
-
-    # 9. Show modal (needs QApplication to already exist)
-    try:
-        from PySide6 import QtWidgets
-
-        # Phase 4 fix: parent dialog to main window + force front/focus
-        dlg = QtWidgets.QMessageBox(parent=window)
-        dlg.setWindowIcon(QtWidgets.QApplication.instance().windowIcon())
-
-        # Phase 4 fix: detect pending retry state
-        is_pending = (
-            config.get("update_pending")
-            and config.get("update_pending_version") == new_ver
-        )
-
-        if is_pending:
-            dlg.setWindowTitle("Fry Hub Update Incomplete")
-            dlg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-            dlg.setText("A previous update did not finish installing.")
-            dlg.setInformativeText(
-                f"Current: v{cur_ver}\nPending: v{new_ver}\n\n"
-                "Retry installation now?"
-            )
-        elif force_update:
-            dlg.setWindowTitle("Fry Hub Update Required")
-            dlg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-            dlg.setText("A required update must be installed before continuing.")
-            dlg.setInformativeText(
-                f"Current: v{cur_ver}\nRequired: v{new_ver}"
-            )
-        else:
-            dlg.setWindowTitle("Fry Hub Update Available")
-            dlg.setIcon(QtWidgets.QMessageBox.Icon.Information)
-            dlg.setText("A new version of Fry Hub is available.")
-            dlg.setInformativeText(
-                f"Current: v{cur_ver}\nAvailable: v{new_ver}\n\n"
-                "Download and install now?"
-            )
-
-        update_btn = dlg.addButton(
-            "Update Now", QtWidgets.QMessageBox.ButtonRole.AcceptRole
-        )
-        if force_update:
-            exit_btn = dlg.addButton(
-                "Exit", QtWidgets.QMessageBox.ButtonRole.RejectRole
-            )
-            auto_cb = None
-        else:
-            skip_btn = dlg.addButton(
-                "Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole
-            )
-            auto_cb = QtWidgets.QCheckBox(
-                "Always update automatically (skip this prompt)"
-            )
-            dlg.setCheckBox(auto_cb)
-
-        dlg.setDefaultButton(update_btn)
-        # Phase 4 fix: deterministic front/focus on Windows
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
-        dlg.exec()
-        clicked = dlg.clickedButton()
-
-        if clicked == update_btn:
-            # Download + verify — offloaded to thread to keep UI responsive
-            enable_auto = (
-                auto_cb is not None and auto_cb.isChecked()
-            )
-            _threaded_download_and_launch(
-                manifest, dest, config, window, enable_auto_update=enable_auto
-            )
-            return
-        else:
-            # Skip or Exit
-            config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
-            config["last_seen_hub_version"] = new_ver
-            # Phase 4 fix: if user exits a forced update, mark pending
-            # so next launch shows retry dialog instead of raw force prompt
-            if force_update:
-                config["update_pending"] = True
-                config["update_pending_version"] = new_ver
-            write_hub_config(config)
-            if force_update:
-                sys.exit(0)  # Required update refused — exit before event loop
-            return  # Skip — Hub launches normally
-
-    except Exception as exc:
-        _logger.warning("Hub update modal failed (%s); skipping update", exc)
-        return
-
-
-def _launch_hub_setup_and_exit(setup_exe: Path, config: dict, manifest: dict, window=None) -> None:
-    """Launch Inno Setup via a PowerShell wrapper that waits for Hub to exit.
-
-    Phase 3e Part 3 fix (a): PyInstaller's bootloader parent holds an OS-loader
-    SEC_IMAGE mapping on frynetworks_installer.exe during _MEI cleanup after the
-    Python child exits.  If Inno writes during that window the write fails with
-    ERROR_ACCESS_DENIED.  Spawning Inno through a PowerShell wrapper that polls
-    for the Hub PID to disappear (+ 3 s grace) eliminates the race.
-    """
-    import textwrap
-
-    inno_log = (
-        Path(tempfile.gettempdir())
-        / "FryNetworks"
-        / "hub-update"
-        / "fryhub-update-install.log"
-    )
-    wrapper_dir = inno_log.parent
-    wrapper_dir.mkdir(parents=True, exist_ok=True)
-    wrapper_path = wrapper_dir / "fryhub-launch-update.ps1"
-
-    ps_script = textwrap.dedent(r"""\
-    param(
-        [int]$HubPid,
-        [int]$BootloaderPid,
-        [string]$InnoExe,
-        [string]$InnoLog
-    )
-
-    # Phase 3e Part 3 diagnostic instrumentation (TEMPORARY)
-    $wrapperLog = "$env:TEMP\FryNetworks\hub-update\wrapper-diag-$(Get-Date -Format 'yyyyMMddHHmmss').log"
-    function W($msg) { "$([DateTime]::UtcNow.ToString('o')) $msg" | Out-File -FilePath $wrapperLog -Append -Encoding UTF8 }
-    W "WRAPPER_START HubPid=$HubPid InnoExe=$InnoExe InnoLog=$InnoLog"
-    W "PSCommandPath=$PSCommandPath"
-    W "Identity: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-    W "Elevated: $(([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))"
-    W "InnoExe Test-Path: $(Test-Path $InnoExe)"
-    if (Test-Path $InnoExe) { W "InnoExe size: $((Get-Item $InnoExe).Length)" }
-    W "InnoLog parent Test-Path: $(Test-Path (Split-Path $InnoLog -Parent))"
-    $preSha = (Get-FileHash -Algorithm SHA256 -Path 'C:\Program Files\FryNetworks\\frynetworks_installer.exe' -ErrorAction SilentlyContinue).Hash
-    W "Pre-Inno target SHA: $preSha"
-
-    # Phase 3e fix: wait for BOTH Python child AND bootloader parent to exit
-    # Bootloader holds SEC_IMAGE mapping on frynetworks_installer.exe during _MEI cleanup
-    $elapsed = 0
-    $hubAlive = $true
-    $blAlive = $true
-    while ($elapsed -lt 60) {
-        $hubAlive = (Get-Process -Id $HubPid -ErrorAction SilentlyContinue) -ne $null
-        $blAlive = (Get-Process -Id $BootloaderPid -ErrorAction SilentlyContinue) -ne $null
-        if ((-not $hubAlive) -and (-not $blAlive)) {
-            W "Post-poll: both PIDs exited after ${elapsed}s"
-            break
-        }
-        Start-Sleep -Seconds 1
-        $elapsed++
-    }
-    if ($hubAlive -or $blAlive) {
-        W "Post-poll: TIMEOUT after 60s HubAlive=$hubAlive BootloaderAlive=$blAlive"
-        exit 62
-    }
-    W "Pre-Inno launch"
-
-    try {
-        $innoProc = Start-Process -FilePath $InnoExe -ArgumentList @('/SILENT','/SP-','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS','/NORESTART',('/LOG=' + $InnoLog)) -WindowStyle Hidden -PassThru -Wait
-        W "Inno exit: code=$($innoProc.ExitCode) pid=$($innoProc.Id) hasExited=$($innoProc.HasExited)"
-    } catch {
-        W "Inno launch EXCEPTION: $($_ | Out-String)"
-    }
-
-    $postSha = (Get-FileHash -Algorithm SHA256 -Path 'C:\Program Files\FryNetworks\\frynetworks_installer.exe' -ErrorAction SilentlyContinue).Hash
-    W "Post-Inno target SHA: $postSha"
-    W "WRAPPER_END"
-
-    try { Move-Item -LiteralPath $PSCommandPath -Destination "$PSCommandPath.completed-$(Get-Date -Format 'yyyyMMddHHmmss')" -Force -ErrorAction SilentlyContinue } catch {}
-""")
-    wrapper_path.write_text(ps_script, encoding="utf-8")
-
-    try:
-        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
-        config["last_seen_hub_version"] = manifest["hub_version"]
-        write_hub_config(config)
-
-        # Phase 3e Part 3 fix (b): explicit null handles for PowerShell child.
-        # DETACHED_PROCESS allocates no console; powershell.exe (console app) needs
-        # valid stdin/stdout/stderr or its startup fails silently before wrapper code
-        # runs. CREATE_NEW_PROCESS_GROUP isolates the child from parent signal group.
-        # Capturing p.pid lets us log it for next-run forensics.
-        p = subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile", "-NonInteractive",
-                "-ExecutionPolicy", "Bypass",
-                "-WindowStyle", "Hidden",
-                "-File", str(wrapper_path),
-                "-HubPid", str(os.getpid()),
-                "-BootloaderPid", str(os.getppid()),
-                "-InnoExe", str(setup_exe),
-                "-InnoLog", str(inno_log),
-            ],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-        _logger.info("Hub-update wrapper Popen returned PID=%d", p.pid)
-
-        # Phase 4 fix: verify wrapper actually started before exiting FryHub
-        try:
-            p.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass  # Still running after 2s — success path
-        else:
-            # Process exited within 2s (failure — policy block, missing exe, etc.)
-            exit_code = p.poll()
-            _logger.error("Update wrapper exited early with code %s", exit_code)
-            if window is not None:
-                from PySide6 import QtWidgets
-                QtWidgets.QMessageBox.critical(
-                    window,
-                    "Update Failed",
-                    "The update installer could not be started. "
-                    "Please try again later or download the latest version from fry.farm.",
-                )
-            return  # Do NOT sys.exit — let Hub continue
-
-        sys.exit(0)
-    except Exception as exc:
-        _logger.error("Failed to launch update wrapper: %s", exc)
-        if window is not None:
-            from PySide6 import QtWidgets
-            QtWidgets.QMessageBox.critical(
-                window,
-                "Update Failed",
-                "The update installer could not be started. "
-                "Please try again later or download the latest version from fry.farm.",
-            )
-        # Do NOT sys.exit — let Hub launch normally
-
-
-def _threaded_download_and_launch(
-    manifest: dict,
-    dest: Path,
-    config: dict,
-    window,
-    enable_auto_update: bool = False,
-) -> None:
-    """Offload _download_hub_setup to a thread and marshal result back to main thread.
-
-    Keeps the Qt event loop responsive during the up-to-120s download.
-    All UI actions (dialogs / sys.exit) run on the main thread via QTimer.singleShot.
-    """
-    def _download_worker() -> None:
-        try:
-            setup_path = _download_hub_setup(
-                manifest["setup_url"], dest, manifest["setup_sha256"]
-            )
-        except Exception as exc:
-            _logger.warning("Hub update download failed: %s", exc)
-            setup_path = None
-        try:
-            from PySide6 import QtCore
-            QtCore.QTimer.singleShot(
-                0,
-                lambda: _on_download_done(
-                    setup_path, manifest, config, window, enable_auto_update
-                ),
-            )
-        except Exception as exc:
-            _logger.warning("Failed to marshal hub update result: %s", exc)
-
-    def _on_download_done(
-        setup_path: Optional[Path],
-        manifest: dict,
-        config: dict,
-        window,
-        enable_auto_update: bool,
-    ) -> None:
-        if setup_path is None:
-            _logger.debug("Hub update download failed; continuing launch")
-            return
-        if enable_auto_update:
-            config["auto_update_hub"] = True
-        config["last_update_check_at"] = datetime.now(timezone.utc).isoformat()
-        config["last_seen_hub_version"] = manifest["hub_version"]
-        config["update_pending"] = True
-        config["update_pending_version"] = manifest["hub_version"]
-        write_hub_config(config)
-        _launch_hub_setup_and_exit(setup_path, config, manifest, window)
-
-    threading.Thread(target=_download_worker, daemon=True).start()
 
 
 def main():
@@ -612,6 +156,13 @@ Examples:
                          help='Enable automatic Hub updates (persists to hub_config.json)')
     auto_grp.add_argument('--no-auto-update-hub', action='store_true',
                          help='Disable automatic Hub updates (persists to hub_config.json)')
+
+    parser.add_argument('--headless', action='store_true',
+                        help='Run update checks without GUI (for scheduled task)')
+    parser.add_argument('--update-poc', action='store_true',
+                        help='Check/update PoC service binaries')
+    parser.add_argument('--update-all', action='store_true',
+                        help='Check hub + PoC updates (default for headless)')
 
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -687,6 +238,11 @@ Examples:
     # Parse arguments
     args = parser.parse_args()
     
+    # Headless mode: run update checks without GUI
+    if getattr(args, 'headless', False):
+        from core.hub_updater import run_headless_updates
+        return run_headless_updates(args)
+
     # Handle no command or GUI request
     if not args.command or args.gui:
         return launch_gui(args)
@@ -805,27 +361,6 @@ def _read_installed_installer_version() -> Optional[str]:
         pass
     return None
 
-
-def _compare_versions(a: str, b: str) -> int:
-    """Return -1 if a<b, 0 if equal, +1 if a>b. Compares numeric tuples.
-
-    Inlined here (not imported from tools.updater) because the installer
-    PyInstaller spec does not bundle tools/ as an importable package.
-    """
-    def tup(s):
-        s = (s or "").lstrip("v").split("-", 1)[0].split("+", 1)[0]
-        parts = s.split(".") if s else []
-        out = []
-        for p in parts:
-            try:
-                out.append(int(p))
-            except ValueError:
-                out.append(0)
-        return tuple(out)
-    ta, tb = tup(a), tup(b)
-    if ta < tb: return -1
-    if ta > tb: return 1
-    return 0
 
 
 def _self_downgrade_check():

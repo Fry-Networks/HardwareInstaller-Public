@@ -1,7 +1,7 @@
 # Registers or removes the FryNetworks updater scheduled task.
 # The updater auto-discovers version from installed configs (no --current-version needed).
 param(
-    [string]$UpdaterPath = (Join-Path (Split-Path $PSScriptRoot) "frynetworks_updater.exe"),
+    [string]$UpdaterPath = (Join-Path (Split-Path $PSScriptRoot) "frynetworks_installer.exe"),
     [string]$TaskName = "FryNetworksUpdater",
     [switch]$Remove = $false,
     [switch]$RunNow = $false,
@@ -38,7 +38,7 @@ try {
         throw "Updater not found at $UpdaterPath"
     }
 
-    $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--quiet --update-poc" -WorkingDirectory (Split-Path $UpdaterPath)
+    $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--headless --update-all --quiet" -WorkingDirectory (Split-Path $UpdaterPath)
     $triggers = @(
         New-ScheduledTaskTrigger -AtLogOn
         New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)

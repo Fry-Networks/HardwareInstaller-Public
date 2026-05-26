@@ -195,22 +195,23 @@ class ConflictDetector:
             return {"error": new_miner["error"]}
         
         # Validate miner key exists in the system via External API
-        try:
-            miner_profile = self.api_client.get_miner_profile(new_key)
-            if not miner_profile.get("exists", False):
-                detail_msg = miner_profile.get("detail") or "Miner key not found in the backend."
-                return {
-                    "error": detail_msg,
-                    "has_conflicts": True,
-                    "details": [{
-                        "type": "invalid_key",
-                        "severity": "error", 
-                        "message": detail_msg,
-                        "resolution": "Verify the key or contact support to register it."
-                    }]
-                }
-        except ApiError as e:
-            msg = str(e)
+        miner_profile: Optional[Dict[str, Any]] = None
+        last_api_error: Optional[ApiError] = None
+        for attempt, delay in enumerate([0, 1, 2], start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                miner_profile = self.api_client.get_miner_profile(new_key)
+                last_api_error = None
+                break
+            except ApiError as e:
+                last_api_error = e
+                msg = str(e)
+                # Retry only on transient 404; other errors fail immediately
+                if "404" not in msg and "not found" not in msg.lower():
+                    break
+        if last_api_error is not None:
+            msg = str(last_api_error)
             detail_msg = msg
             try:
                 brace = msg.find("{")
@@ -222,13 +223,14 @@ class ConflictDetector:
             except Exception:
                 detail_msg = msg
             if "404" in msg or "not found" in msg.lower():
+                user_msg = "Key not found in Fry Networks source-of-truth database."
                 return {
-                    "error": detail_msg,
+                    "error": user_msg,
                     "has_conflicts": True,
                     "details": [{
                         "type": "invalid_key",
                         "severity": "error",
-                        "message": detail_msg,
+                        "message": user_msg,
                         "resolution": "Verify the key or contact support to register it."
                     }]
                 }
@@ -242,15 +244,16 @@ class ConflictDetector:
                     "resolution": "Check network connection and API availability"
                 }]
             }
-        except Exception as e:
+        if miner_profile is not None and not miner_profile.get("exists", False):
+            user_msg = "Key not found in Fry Networks source-of-truth database."
             return {
-                "error": "Could not validate miner key.",
+                "error": user_msg,
                 "has_conflicts": True,
                 "details": [{
-                    "type": "validation_error",
+                    "type": "invalid_key",
                     "severity": "error",
-                    "message": f"Unexpected validation failure: {e}",
-                    "resolution": "Retry or contact support."
+                    "message": user_msg,
+                    "resolution": "Verify the key or contact support to register it."
                 }]
             }
         
