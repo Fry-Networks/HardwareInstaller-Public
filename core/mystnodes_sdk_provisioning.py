@@ -92,6 +92,26 @@ def _write_state_file(install_root: Path) -> None:
         LOGGER.warning("state file write failed (non-fatal): %s", exc)
 
 
+def _copy_with_retry(src: Path, dst: Path, max_attempts: int = 3, delay_seconds: float = 2.0) -> None:
+    """Copy src to dst with bounded retry on transient file-lock errors (WinError 32)."""
+    last_err: Optional[OSError] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            shutil.copy2(src, dst)
+            return
+        except (OSError, PermissionError) as exc:
+            last_err = exc
+            if attempt < max_attempts:
+                LOGGER.warning(
+                    "binary copy attempt %s/%s failed: %s — retrying in %ss",
+                    attempt, max_attempts, exc, delay_seconds,
+                )
+                time.sleep(delay_seconds)
+            else:
+                break
+    raise last_err  # type: ignore[misc]
+
+
 def _step_stage_binary(install_root: Path) -> StepResult:
     """1/6: Copy sdk_client.exe from SDK/windows-mystnodes-sdk/ to install root."""
     src = install_root / SDK_SOURCE_REL
@@ -99,8 +119,8 @@ def _step_stage_binary(install_root: Path) -> StepResult:
     if not src.exists():
         return StepResult(False, "1/6", f"SDK binary missing at {src}")
     try:
-        shutil.copy2(src, dst)
-    except OSError as exc:
+        _copy_with_retry(src, dst)
+    except (OSError, PermissionError) as exc:
         return StepResult(False, "1/6", f"binary copy failed: {exc}")
     return StepResult(True, "1/6")
 
@@ -244,6 +264,25 @@ def provision_mystnodes_sdk_at_install(
     token = _read_token_from_build_config(install_root)
     if not token:
         return StepResult(False, "0/6", "MYST_REG_TOKEN missing from build_config.json")
+
+    # 4.0.21.4: Stop existing SDK service + kill lingering process before binary copy.
+    # Prevents WinError 32 on reinstall/upgrade when sdk_client.exe is already running.
+    if nssm_path.exists():
+        try:
+            subprocess.run(
+                [str(nssm_path), "stop", SDK_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", SDK_BINARY_NAME],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    time.sleep(2)  # Brief pause for file handles to release
 
     steps = [
         ("1/6", "stage_binary", lambda: _step_stage_binary(install_root)),

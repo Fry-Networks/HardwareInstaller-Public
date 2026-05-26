@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import hashlib
+import json
 import subprocess
 import sys
 import os
@@ -50,12 +51,14 @@ def get_current_version(platform: Optional[str] = None):
 
 
 def parse_version(version_str):
-    """Parse version string into major, minor, patch."""
+    """Parse version string into major, minor, patch.
+    Accepts 3-part (MAJOR.MINOR.PATCH) or 4-part (MAJOR.MINOR.PATCH.BUILD)
+    format; extra parts beyond the third are ignored for bump logic."""
     parts = version_str.split('.')
-    if len(parts) != 3:
-        raise ValueError(f"Invalid version format: {version_str}. Expected MAJOR.MINOR.PATCH")
+    if len(parts) < 3:
+        raise ValueError(f"Invalid version format: {version_str}. Expected at least MAJOR.MINOR.PATCH")
     try:
-        return tuple(int(p) for p in parts)
+        return tuple(int(p) for p in parts[:3])
     except ValueError:
         raise ValueError(f"Invalid version format: {version_str}. All parts must be integers")
 
@@ -109,7 +112,7 @@ def run_build(version):
         return False
 
     print(f"\n{'='*60}")
-    print(f"Building Fry Networks Installer v{version} ({'windows' if is_windows else 'linux'})")
+    print(f"Building Fry Hub v{version} ({'windows' if is_windows else 'linux'})")
     print(f"{'='*60}\n")
 
     try:
@@ -139,6 +142,35 @@ def emit_sha256(file_path: Path) -> Optional[Path]:
     print(f"[SHA256] {digest}  {file_path.name}")
     print(f"[SHA256] Written to {sha_path}")
     return sha_path
+
+
+def build_registry_envelope(registry_path: Path = None) -> Path:
+    """Wrap core/miner_registry.json in an integrity envelope for CDN upload.
+
+    The envelope contains:
+    - ``manifest_version``: always ``"1.0.0"``
+    - ``sha256``: hex digest of the canonical JSON form of the registry
+    - ``registry``: the full registry object
+
+    Output: ``dist/miner_registry_envelope.json``
+    """
+    src = registry_path or Path("core/miner_registry.json")
+    raw = src.read_text(encoding="utf-8")
+    registry = json.loads(raw)
+    # Canonical form for deterministic hash regardless of JSON formatting
+    canonical = json.dumps(registry, sort_keys=True, separators=(",", ":"))
+    sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    envelope = {
+        "manifest_version": "1.0.0",
+        "sha256": sha,
+        "registry": registry,
+    }
+    out = Path("dist") / "miner_registry_envelope.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+    print(f"[ENVELOPE] SHA-256: {sha}")
+    print(f"[ENVELOPE] Written to {out}")
+    return out
 
 
 # --- MSI helpers (WiX) ---
@@ -248,6 +280,55 @@ def build_msi(
         return False
 
 
+def build_inno(version: str) -> Path:
+    """Compile packaging/fryhub.iss into dist/FryHubSetup-<version>.exe via ISCC."""
+    candidates = [
+        Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe")),
+        Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+        Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
+    ]
+    iscc = None
+    for p in candidates:
+        if p.exists():
+            iscc = p
+            break
+    if iscc is None:
+        raise FileNotFoundError(
+            "ISCC.exe not found at any of:\n"
+            + "\n".join(f"  • {p}" for p in candidates)
+            + "\nInstall Inno Setup 6 from https://jrsoftware.org/isdl.php "
+            "(or via `winget install --id JRSoftware.InnoSetup -e`)."
+        )
+    iss = Path("packaging/fryhub.iss")
+    if not iss.exists():
+        raise FileNotFoundError(f"Inno script missing: {iss}")
+    out_dir = Path("dist")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(iscc),
+        f"/DAppVersion={version}",
+        "/Q",                  # quiet — only errors print
+        str(iss),
+    ]
+    print(f"[inno] {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["MSYS_NO_PATHCONV"] = "1"   # prevent MSYS2 from mangling /D and /Q flags
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ISCC compile failed (exit {result.returncode}). See stderr above."
+        )
+    out = out_dir / f"FryHubSetup-{version}.exe"
+    if not out.exists():
+        raise RuntimeError(f"Inno output missing after compile: {out}")
+    print(f"[inno] OK: {out}  ({out.stat().st_size:,} bytes)")
+    return out
+
+
 def show_version_info():
     """Display current version information."""
     win_version = get_current_version("windows")
@@ -256,16 +337,72 @@ def show_version_info():
     lin_major, lin_minor, lin_patch = parse_version(lin_version)
     
     print("\n" + "="*60)
-    print("Fry Networks Installer - Version Information")
+    print("Fry Hub - Version Information")
     print("="*60)
     print(f"Windows Version: {win_version}  (Major={win_major}, Minor={win_minor}, Patch={win_patch})")
     print(f"Linux Version:   {lin_version}  (Major={lin_major}, Minor={lin_minor}, Patch={lin_patch})")
     print("="*60 + "\n")
 
 
+def _upload_github_release(
+    version: str,
+    exe_path: Path,
+    *,
+    min_required: Optional[str] = None,
+) -> None:
+    """Update fryhub_version.json and create a GitHub Release.
+
+    Steps:
+      1. Compute SHA-256 of the built setup exe.
+      2. Update fryhub_version.json in repo root.
+      3. Create GitHub Release via ``gh release create``.
+    """
+    if not exe_path.exists():
+        raise FileNotFoundError(f"Setup exe not found: {exe_path}")
+
+    sha = hashlib.sha256(exe_path.read_bytes()).hexdigest().upper()
+    tag = f"v{version}"
+    download_url = (
+        "https://github.com/Fry-Foundation/HardwareInstaller-Public/"
+        f"releases/download/{tag}/FryHubSetup-{version}.exe"
+    )
+
+    manifest = {
+        "manifest_version": "1.0.0",
+        "hub_version": version,
+        "setup_url": download_url,
+        "setup_sha256": sha,
+    }
+    if min_required:
+        manifest["min_required"] = min_required
+
+    manifest_path = Path(__file__).parent / "fryhub_version.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"[GitHub] Updated {manifest_path} (SHA256={sha[:16]}...)")
+
+    # Create release via gh CLI
+    result = subprocess.run(
+        [
+            "gh", "release", "create", tag,
+            str(exe_path),
+            "--title", f"Fry Hub {tag}",
+            "--notes", f"Fry Hub {version} release.",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[GitHub] gh release create stderr: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"gh release create failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    print(f"[GitHub] Release created: {tag}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Fry Networks Installer Build Tool",
+        description="Fry Hub Build Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -333,14 +470,56 @@ Examples:
         action="store_true",
         help="Do not write a .sha256 checksum next to the built MSI"
     )
-    
+    parser.add_argument(
+        "--inno",
+        action="store_true",
+        help="On Windows, also build an Inno Setup installer after building the EXE"
+    )
+    parser.add_argument(
+        "--upload-github",
+        action="store_true",
+        help="Create GitHub Release and update fryhub_version.json manifest"
+    )
+    # Deprecated — kept for backward compat; use --upload-github instead
+    bunny_grp = parser.add_mutually_exclusive_group()
+    bunny_grp.add_argument(
+        "--upload-hub",
+        action="store_true",
+        help="(Deprecated) Upload dist/FryHubSetup-{ver}.exe to Bunny CDN"
+    )
+    bunny_grp.add_argument(
+        "--rollback-hub",
+        metavar="VERSION",
+        help="(Deprecated) Rollback Hub manifest to point at archived VERSION"
+    )
+    parser.add_argument(
+        "--min-required",
+        metavar="VERSION",
+        help="Set min_required in hub manifest (force-update threshold)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing CDN artifact"
+    )
+
     args = parser.parse_args()
     
     # Show version and exit
     if args.show:
         show_version_info()
         return 0
-    
+
+    # Standalone rollback (no build needed)
+    if args.rollback_hub:
+        from tools.bunny_upload import rollback_hub
+        try:
+            rollback_hub(args.rollback_hub)
+            return 0
+        except Exception as e:
+            print(f"Rollback failed: {e}", file=sys.stderr)
+            return 1
+
     target_platform = _detect_platform()
     current_version = get_current_version(target_platform)
     print(f"Current {target_platform} version: {current_version}")
@@ -403,6 +582,7 @@ Examples:
                 continue
             for artifact in sorted(list(d.glob("*.msi")) + list(d.glob("*.exe"))):
                 emit_sha256(artifact)
+        build_failures = []
         if args.msi and (sys.platform.startswith("win") or os.name == "nt"):
             exe_path = Path(args.msi_exe) if args.msi_exe else None
             out_dir = Path(args.msi_out_dir) if args.msi_out_dir else None
@@ -413,7 +593,38 @@ Examples:
                 output_dir=out_dir,
                 emit_checksum=not args.msi_no_checksum,
             )
-            return 0 if msi_ok else 1
+            if not msi_ok:
+                build_failures.append("MSI")
+        if args.inno and (sys.platform.startswith("win") or os.name == "nt"):
+            try:
+                build_inno(target_version)
+            except Exception as e:
+                print(f"Inno build failed: {e}")
+                build_failures.append("Inno")
+        if args.upload_github:
+            exe_name = f"FryHubSetup-{target_version}.exe"
+            exe_path = Path("dist") / exe_name
+            try:
+                _upload_github_release(target_version, exe_path,
+                                       min_required=args.min_required)
+            except Exception as e:
+                print(f"GitHub release failed: {e}", file=sys.stderr)
+                build_failures.append("GitHubRelease")
+        if args.upload_hub:
+            # Deprecated: Bunny CDN upload
+            from tools.bunny_upload import upload_hub
+            exe_name = f"FryHubSetup-{target_version}.exe"
+            exe_path = Path("dist") / exe_name
+            try:
+                upload_hub(target_version, exe_path,
+                           min_required=args.min_required,
+                           force=args.force)
+            except Exception as e:
+                print(f"Upload failed: {e}", file=sys.stderr)
+                build_failures.append("Upload")
+        if build_failures:
+            print(f"Post-build packaging failed: {', '.join(build_failures)}")
+            return 1
         return 0
     else:
         print(f"\n? Build failed for version {target_version}")

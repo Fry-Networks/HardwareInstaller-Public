@@ -24,7 +24,7 @@ Build steps (example)
    With the current authoring, the CAB is embedded into the MSI (`EmbedCab="yes"`), so the MSI is a single file containing the payload.
 
 Notes
-- The MSI installs the EXE under `Program Files\FryInstaller` and creates a Start Menu shortcut "Fry Installer."
+- The MSI installs the EXE under `Program Files\FryInstaller` and creates a Start Menu shortcut "Fry Hub."
 - UpgradeCode is fixed in the `.wxs`; keep it stable to allow upgrades.
 - If you rename the EXE, pass the new filename via `-dInstallerExeName`. If you move the EXE, update `-dInstallerExe`.
 - To add more files (icons, config), duplicate the `<Component>` pattern in the `.wxs` and reference them in the `Feature`.

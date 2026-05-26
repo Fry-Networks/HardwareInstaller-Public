@@ -1,0 +1,7 @@
+{
+  "manifest_version": "1.0.0",
+  "hub_version": "4.0.26",
+  "setup_url": "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases/download/v4.0.26/FryHubSetup-4.0.26.exe",
+  "setup_sha256": "66B9A52432E2A5CEB520E20F8C8658F8CDE800E9D72EAE804A856C16F0B8FC2C",
+  "min_required": "4.0.20"
+}
