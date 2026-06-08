@@ -47,7 +47,7 @@ def _fetch_hub_manifest(timeout: int = 5) -> Optional[dict]:
     try:
         req = urllib.request.Request(_HUB_MANIFEST_URL)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode("utf-8-sig"))
     except Exception:
         import traceback as _diag2_tb
         import os as _diag2_os
@@ -493,7 +493,7 @@ def _fetch_json(url: str, token: Optional[str] = None) -> dict:
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(resp.read().decode("utf-8-sig"))
 
 
 def _download_file(url: str, dest: Path, token: Optional[str] = None) -> None:

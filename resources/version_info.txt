@@ -4,8 +4,8 @@
 # http://msdn.microsoft.com/en-us/library/ms646997.aspx
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(4, 0, 30, 0),
-    prodvers=(4, 0, 30, 0),
+    filevers=(4, 0, 31, 0),
+    prodvers=(4, 0, 31, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,11 +21,11 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Fry Networks'),
             StringStruct(u'FileDescription', u'Fry Hub'),
-            StringStruct(u'FileVersion', u'4.0.30'),
+            StringStruct(u'FileVersion', u'4.0.31'),
             StringStruct(u'InternalName', u'frynetworks_installer'),
             StringStruct(u'OriginalFilename', u'frynetworks_installer.exe'),
             StringStruct(u'ProductName', u'Fry Hub'),
-            StringStruct(u'ProductVersion', u'4.0.30'),
+            StringStruct(u'ProductVersion', u'4.0.31'),
           ]
         )
       ]
