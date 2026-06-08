@@ -634,8 +634,14 @@ def _update_poc_service(
         [nssm, "status", old_service],
         capture_output=True, timeout=10,
     )
-    svc_state = status.stdout.decode("utf-16-le", errors="ignore").strip()
-    if "STOPPED" not in svc_state and "SERVICE_STOPPED" not in svc_state:
+    out = status.stdout.decode("utf-16-le", errors="ignore").strip()
+    err = status.stderr.decode("utf-16-le", errors="ignore").strip()
+    svc_state = out + err
+    if (
+        "STOPPED" not in svc_state
+        and "SERVICE_STOPPED" not in svc_state
+        and "does not exist" not in svc_state
+    ):
         raise RuntimeError(
             f"Service {old_service} failed to stop "
             f"(nssm stop rc={result.returncode}, status={svc_state!r})"
@@ -643,10 +649,16 @@ def _update_poc_service(
     _poc_log(f"[INFO] STOPPED: {old_service}", log_path)
 
     # 2. Remove old service
-    subprocess.run(
+    remove_result = subprocess.run(
         [nssm, "remove", old_service, "confirm"],
-        check=True, capture_output=True, timeout=15,
+        check=False, capture_output=True, timeout=15,
     )
+    remove_err = remove_result.stderr.decode("utf-16-le", errors="ignore").strip()
+    if remove_result.returncode != 0 and "does not exist" not in remove_err:
+        raise RuntimeError(
+            f"Service {old_service} failed to remove "
+            f"(nssm remove rc={remove_result.returncode}, err={remove_err!r})"
+        )
     _poc_log(f"[INFO] REMOVED: {old_service}", log_path)
 
     # 3. Backup old exe(s)
@@ -683,14 +695,8 @@ def _update_poc_service(
         )
     _poc_log(f"[INFO] REGISTERED: {new_service}", log_path)
 
-    # 6. Start new service
-    subprocess.run(
-        [nssm, "start", new_service],
-        check=True, capture_output=True, timeout=30,
-    )
-    _poc_log(f"[INFO] STARTED: {new_service}", log_path)
-
-    # 7. Update installer_config.json
+    # 6. Update installer_config.json BEFORE starting service
+    # so that even if nssm start fails the config reflects the new binary.
     cfg_path = info["config_path"]
     try:
         cfg_data = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -701,6 +707,13 @@ def _update_poc_service(
         _poc_log(f"[INFO] CONFIG UPDATED: {cfg_path}", log_path)
     except Exception as exc:
         _poc_log(f"[WARN] config update failed ({cfg_path}): {exc}", log_path)
+
+    # 7. Start new service
+    subprocess.run(
+        [nssm, "start", new_service],
+        check=True, capture_output=True, timeout=30,
+    )
+    _poc_log(f"[INFO] STARTED: {new_service}", log_path)
 
 
 def update_installed_poc_binaries(

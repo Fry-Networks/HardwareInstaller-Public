@@ -1037,12 +1037,21 @@ def install_miner(args):
     # Install service
     print("\\nInstalling service...")
     service_manager = ServiceManager(key_info["code"])
+    # Build partner SDK staging map based on miner code
+    stage_partner_sdks: dict[str, bool] = {}
+    if sdk_opt_in:
+        stage_partner_sdks["mystnodes_sdk"] = True
+    if key_info.get("code") == "SVN":
+        stage_partner_sdks["xmrig"] = True
+    if key_info.get("code") == "SDN":
+        stage_partner_sdks["space_acres"] = True
+
     install_result = service_manager.install_service(
         args.key,
         auto_start=args.auto_start,
         system_wide=args.system_wide,
         sdk_opt_in=sdk_opt_in,
-        _stage_partner_sdks={"mystnodes_sdk": True} if sdk_opt_in else {},
+        _stage_partner_sdks=stage_partner_sdks,
     )
 
     if install_result["success"]:

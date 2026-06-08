@@ -46,6 +46,7 @@ from version import __version__ as version_str
 from gui.mysterium_tos_dialog import show_mysterium_consent_dialog
 from core.tos_state import write_tos_state, read_tos_state, is_resolved_accept
 from core.mystnodes_sdk_provisioning import provision_mystnodes_sdk_at_install, cleanup_mystnodes_sdk_on_failure
+from core.docker_installer import ensure_docker
 
 _NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
 
@@ -477,11 +478,14 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
 
         # Prominent Manage Installed Miners and Nodes button under the banner with warning indicator
         try:
-            manage_row = QtWidgets.QHBoxLayout()
+            manage_row_widget = QtWidgets.QFrame()
+            manage_row = QtWidgets.QHBoxLayout(manage_row_widget)
             manage_btn = QtWidgets.QPushButton("Manage Installed Miners and Nodes")
             manage_btn.setToolTip("Open the Manage Installed Miners and Nodes panel (Ctrl+M)")
             manage_btn.setFixedHeight(36)
             manage_btn.clicked.connect(self.show_manage_panel)
+            manage_btn.setObjectName("manageInstalledMinersButton")
+            manage_btn.setAccessibleName("manageInstalledMinersButton")
             try:
                 manage_btn.setShortcut("Ctrl+M")
             except Exception:
@@ -492,6 +496,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             update_btn.setToolTip("Check for a newer version of this installer")
             update_btn.setFixedHeight(36)
             update_btn.clicked.connect(self._check_for_updates_clicked)
+            update_btn.setObjectName("checkForUpdatesButton")
+            update_btn.setAccessibleName("checkForUpdatesButton")
             manage_row.addWidget(update_btn, 0)
 
             warning_label = QtWidgets.QLabel("")
@@ -504,7 +510,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             self.version_warning_label = warning_label
             manage_row.addSpacing(12)
             manage_row.addWidget(warning_label, 1)
-            layout.addLayout(manage_row)
+            layout.addWidget(manage_row_widget)
         except Exception:
             self.version_warning_label = None
 
@@ -518,7 +524,11 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(250, self._setup_tray_icon)
 
         # Create wizard for installation process
-        self.wizard = QtWidgets.QWizard()        
+        class _FryWizard(QtWidgets.QWizard):
+            def reject(self):
+                # Prevent embedded wizard from closing/hiding on Cancel
+                pass
+        self.wizard = _FryWizard()
         # Set size policy to expand and use available space
         self.wizard.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -2278,20 +2288,13 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 else:
                     subprocess.Popen([str(gui_exe)], cwd=str(install_dir), creationflags=creation_flags)
                 self._debug_log(f"GUI launch attempted via Popen: {gui_exe}")
-            except Exception:
-                if os.name == 'nt':
-                    try:
-                        os.startfile(str(gui_exe))
-                        self._debug_log(f"GUI launch attempted via os.startfile: {gui_exe}")
-                    except Exception as e2:
-                        try:
-                            self.log_progress(f"[warning] Failed to launch GUI: {e2}")
-                        except Exception:
-                            pass
-                        self._debug_log(f"GUI launch failed via os.startfile: {e2}")
-                        return False
-                else:
-                    raise
+            except Exception as e:
+                try:
+                    self.log_progress(f"[warning] Failed to launch GUI: {e}")
+                except Exception:
+                    pass
+                self._debug_log(f"GUI launch failed: {e}")
+                return False
             return True
         except Exception as e:
             try:
@@ -5041,7 +5044,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             # Reset wizard to first page
             if hasattr(self, 'wizard'):
                 self.wizard.restart()
-                
+
                 # Disable Next/Finish buttons
                 try:
                     nb = self.wizard.button(self.NEXT_BUTTON)
@@ -5049,7 +5052,7 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                         nb.setEnabled(False)
                 except Exception:
                     pass
-                
+
                 try:
                     fb = self.wizard.button(self.FINISH_BUTTON)
                     if fb is not None:
@@ -5221,12 +5224,18 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             if 0 <= idx < len(self._screen_size_choices):
                 options["screen_size"] = self._screen_size_choices[idx][1]
 
-        # Partner integrations (BM only) — gated by TOS consent (Track 3)
-        if miner_info.get("code") == "BM":
+        # Partner integrations — BM gated by TOS consent; SVN always needs xmrig
+        code = miner_info.get("code")
+        stage_map: dict[str, bool] = {}
+        if code == "BM":
             options["sdk_opt_in"] = accept_mysterium
-            options["_stage_partner_sdks"] = {"mystnodes_sdk": True} if accept_mysterium else {}
+            if accept_mysterium:
+                stage_map["mystnodes_sdk"] = True
         else:
             options["sdk_opt_in"] = False
+        if code == "SVN":
+            stage_map["xmrig"] = True
+        options["_stage_partner_sdks"] = stage_map
 
         # Conflict resolution strategy - simplified: always retry with new key
         options["resolve_conflicts"] = "retry_key"
@@ -5237,8 +5246,8 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
             self.status_bar.setText("Conflicts detected - click 'Try Another Key' to enter a different miner key")
             return
 
-        # GPS dongle pre-check for satellite miners (ISM)
-        if miner_info and miner_info.get("code") == "ISM":
+        # GPS dongle pre-check for satellite miners (ISM and OSM)
+        if miner_info and miner_info.get("code") in ("ISM", "OSM"):
             if not getattr(self, '_quiet_mode', False):
                 try:
                     from core.gps_detector import detect_gps_dongle
@@ -5472,8 +5481,36 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                 # Don't write configuration here - it will be written after installation with version info
 
                 # Step 5 — Dependencies (concise)
-                if self.concise_log:
-                    self.log_progress("5. Installing dependencies... ✓")
+                docker_needed = miner_info.get("code") in ("RDN",)
+                if docker_needed:
+                    if self.concise_log:
+                        self.log_progress("5. Checking Docker Desktop...")
+                    self.update_progress(55, "Checking Docker Desktop...")
+                    try:
+                        docker_ok, docker_msg = ensure_docker()
+                        if docker_ok:
+                            if self.concise_log:
+                                self.log_progress("5. Docker Desktop ready ✓")
+                        elif docker_msg == "reboot_required":
+                            if self.concise_log:
+                                self.log_progress(
+                                    "5. Docker Desktop staged (reboot required to activate) ⚠"
+                                )
+                            self.log_progress(
+                                "    Docker will be available after the next reboot."
+                            )
+                        else:
+                            if self.concise_log:
+                                self.log_progress(f"5. Docker Desktop not available ({docker_msg}) ⚠")
+                            self.log_progress(
+                                "    RDN container features (Presearch / Diiisco) will be greyed out until Docker is installed."
+                            )
+                    except Exception as _docker_exc:
+                        if self.concise_log:
+                            self.log_progress(f"5. Docker check failed ({_docker_exc}) ⚠")
+                else:
+                    if self.concise_log:
+                        self.log_progress("5. Installing dependencies... ✓")
 
                 download_attempts = None
                 # Prepare a Step 6 progress callback so ServiceManager can stream updates
@@ -6007,6 +6044,14 @@ class FryNetworksInstallerWindow(QtWidgets.QMainWindow):
                     "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe"
                 )
             _log("Olostep Browser installed successfully")
+
+            # Ensure Windows Firewall allows OlostepBrowser immediately after install
+            try:
+                from core.firewall_manager import FirewallManager
+                fwm = FirewallManager()
+                fwm.ensure_olostep_rule()
+            except Exception as e:
+                self._debug_log(f"[Olostep] could not set firewall rule during install: {e!r}")
 
         except Exception as e:
             raise RuntimeError(f"Failed to download or install Olostep Browser: {str(e)}")
@@ -6963,33 +7008,35 @@ foreach ($loc in $locations) {{
                 _do_reset_after_cancel()
             return
 
-        # No active install: reset to initial page instead of minimizing
+        # No active install: defer reset to avoid blank-screen Qt race
+        def _do_reset_no_install():
+            try:
+                self.hide_manage_panel()
+            except Exception:
+                pass
+            try:
+                self._exit_installation_focus_mode()
+            except Exception:
+                pass
+            try:
+                self.clear_form()
+            except Exception:
+                pass
+            try:
+                self.wizard.setVisible(True)
+                self.wizard.raise_()
+                self.wizard.activateWindow()
+            except Exception:
+                pass
+            try:
+                self.status_bar.setText("Ready - Enter a miner key to begin")
+            except Exception:
+                pass
+
         try:
-            self.hide_manage_panel()
+            QtCore.QTimer.singleShot(0, _do_reset_no_install)
         except Exception:
-            pass
-        try:
-            self._exit_installation_focus_mode()
-        except Exception:
-            pass
-        try:
-            self.clear_form()
-        except Exception:
-            pass
-        try:
-            self.wizard.restart()
-        except Exception:
-            pass
-        try:
-            self.wizard.setVisible(True)
-            self.wizard.raise_()
-            self.wizard.activateWindow()
-        except Exception:
-            pass
-        try:
-            self.status_bar.setText("Ready - Enter a miner key to begin")
-        except Exception:
-            pass
+            _do_reset_no_install()
 
     def _handle_cancel_rollback(self, install_dir: Optional[str], miner_info: Dict[str, Any], options: dict):
         """Perform rollback of partial installation after cancellation."""
@@ -7764,5 +7811,5 @@ $Shortcut.Description = "{desc_str}"
             check=True,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=30
         )

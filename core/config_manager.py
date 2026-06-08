@@ -165,9 +165,10 @@ class ConfigManager:
                 "system_wide": system_wide,
                 "version": "2.3.14",
                 "gui_version": gui_version or "Unknown",
-                "poc_version": poc_version or "Unknown"
                 # NOTE: Bearer tokens and other sensitive data stored in encrypted files only
             }
+            if poc_version:
+                config_data["poc_version"] = poc_version
             
             try:
                 with open(config_file, 'w') as f:

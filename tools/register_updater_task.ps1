@@ -40,14 +40,18 @@ try {
 
     $action = New-ScheduledTaskAction -Execute $UpdaterPath -Argument "--headless --update-all --quiet" -WorkingDirectory (Split-Path $UpdaterPath)
     $triggers = @(
-        New-ScheduledTaskTrigger -AtLogOn
+        New-ScheduledTaskTrigger -AtLogOn;
         New-ScheduledTaskTrigger -Daily -At 10:00AM -RandomDelay (New-TimeSpan -Minutes 30)
     )
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
     $taskPath = "\FryNetworks\"
 
-    $existing = Get-ScheduledTask -TaskName $TaskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+    try {
+        $existing = Get-ScheduledTask -TaskName $TaskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+    } catch {
+        $existing = $null
+    }
     if ($existing) {
         Write-Log "Task $taskPath$TaskName already exists; skipping creation."
     } else {
