@@ -307,10 +307,11 @@
   },
 
   "RDN": {
-    "name": "Router Data Node",
+    "name": "Compute Node",
     "description": "Network router data collection and analysis",
     "group": "Bandwidth",
     "exclusive": null,
+    "docker_desktop": true,
     "system_packages": {
       "linux": [
         "python3-requests",

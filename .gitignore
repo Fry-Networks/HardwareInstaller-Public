@@ -32,3 +32,21 @@ pip-wheel-metadata/
 # Logs
 *.log
 logs/
+
+# Build/release artifacts (committed by mistake in prior sessions)
+_codex_backup/
+backup_*/
+build.pre_rebuild.*/
+dist.pre_rebuild.*/
+release-assets-*/
+.qa-temp-*/
+icon_backup_*/
+icon_staging/
+frynetworks_installer.*-bak.*
+frynetworks_installer.*predeploy-bak*
+frynetworks_installer_test.spec
+frynetworks_installer_v*.spec
+step8-elev.ps1
+_bundle1_backup.ps1
+backup_*.ps1
+release-notes-*.md

@@ -38,13 +38,14 @@ def _nmea_probe(port_device: str, timeout: float) -> bool:
 
     nmea_prefixes = (b"$GP", b"$GN", b"$GL", b"$GA", b"$BD")
 
-    for baud in (9600, 4800):
+    for baud in (115200, 57600, 38400, 9600, 4800):
         try:
             with serial.Serial(port_device, baud, timeout=timeout) as ser:
                 data = ser.read(2048)
                 if any(prefix in data for prefix in nmea_prefixes):
                     return True
-        except Exception:
+        except Exception as _exc:
+            _logger.debug("GPS probe failed on %s @ %d: %s", port_device, baud, _exc)
             continue
     return False
 

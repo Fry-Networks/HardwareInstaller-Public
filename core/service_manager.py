@@ -14,6 +14,7 @@ import sys
 import json
 import shutil
 import subprocess
+import re
 import requests
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -254,6 +255,53 @@ def _locate_sdk_bundle() -> Optional[Path]:
     return None
 
 
+def _find_bundled_poc_asset(miner_code: str, asset_name: str, *, is_windows: bool) -> Optional[Path]:
+    """Return a bundled PoC asset path when the installer ships one locally."""
+    sdk_root = _locate_sdk_bundle()
+    if sdk_root is None:
+        return None
+
+    miner_code = str(miner_code or "").upper()
+    candidates: list[Path] = []
+    if is_windows:
+        candidates.extend([
+            sdk_root / "windows-poc" / asset_name,
+            sdk_root / "windows-poc" / miner_code / asset_name,
+        ])
+    else:
+        candidates.extend([
+            sdk_root / "linux-poc" / asset_name,
+            sdk_root / "linux-poc" / miner_code / asset_name,
+        ])
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    variant_root = sdk_root / ("windows-poc" if is_windows else "linux-poc")
+    variant_dirs = [variant_root, variant_root / miner_code]
+    variant_matches: list[Path] = []
+    for folder in variant_dirs:
+        if folder.exists():
+            variant_matches.extend(
+                p for p in folder.glob(naming.poc_glob(miner_code, windows=is_windows)) if p.is_file()
+            )
+    if variant_matches:
+        prefix = naming.poc_prefix(miner_code)
+        suffix = ".exe" if is_windows else ""
+
+        def _sort_key(path: Path) -> tuple:
+            version = path.name
+            if version.startswith(prefix):
+                version = version[len(prefix):]
+            if suffix and version.endswith(suffix):
+                version = version[:-len(suffix)]
+            return tuple(int(part) for part in re.findall(r"\d+", version))
+
+        return sorted(variant_matches, key=_sort_key, reverse=True)[0]
+    return None
+
+
 def _get_partner_build_config(name: str) -> Dict[str, Any]:
     """Read partner integration settings from the embedded build config."""
     try:
@@ -371,33 +419,304 @@ def _configure_mystnodes_sdk_assets(base_dir: Path, sdk_root: Path, platform: st
     return actions
 
 
+def _configure_xmrig_assets(base_dir: Path, sdk_root: Path, platform: str) -> list[str]:
+    """Copy XMRig binary (fry-validator.exe) for SVN miners.
+
+    Expected by XMRigController at ``SDK/xmrig/fry-validator.exe``.
+    """
+    actions: list[str] = []
+    sdk_dest = base_dir / "SDK" / "xmrig"
+    sdk_dest.mkdir(parents=True, exist_ok=True)
+
+    is_windows = platform.startswith("win")
+    src_folder = "windows-xmrig" if is_windows else "linux-xmrig"
+    executable_name = "fry-validator.exe" if is_windows else "fry-validator"
+
+    sdk_src = sdk_root / src_folder
+    sdk_exe = sdk_src / executable_name
+
+    if sdk_src.exists() and sdk_exe.exists():
+        shutil.copy2(sdk_exe, sdk_dest / executable_name)
+        if not is_windows:
+            import stat
+            (sdk_dest / executable_name).chmod(
+                stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+            )
+        actions.append(f"Copied {executable_name} to SDK/xmrig")
+    else:
+        # Best-effort: don't hard-fail if the SDK bundle is missing this binary.
+        # The GUI will show "XMRig binary not found. Awaiting installation..."
+        actions.append(f"⚠ XMRig SDK bundle missing ({src_folder}/{executable_name})")
+
+    return actions
+
+
+def _configure_space_acres_assets(base_dir: Path, platform: str) -> list[str]:
+    """Download Space Acres EXE for SDN miners.
+
+    Space Acres distributes Windows builds as a standalone .exe.
+    We download the latest release .exe directly to SDK/space-acres/.
+
+    Expected by SpaceAcresController at ``SDK/space-acres/space-acres.exe``.
+    """
+    actions: list[str] = []
+    is_windows = platform.startswith("win")
+    if not is_windows:
+        actions.append("Space Acres staging skipped on non-Windows platform")
+        return actions
+
+    sdk_dest = base_dir / "SDK" / "space-acres"
+    sdk_dest.mkdir(parents=True, exist_ok=True)
+    exe_dest = sdk_dest / "space-acres.exe"
+
+    # Check if already present
+    if exe_dest.exists():
+        actions.append("space-acres.exe already present in SDK/space-acres")
+        return actions
+
+    # Query latest release from GitHub API
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/autonomys/space-acres/releases/latest",
+            headers={"Accept": "application/vnd.github.v3+json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        release = resp.json()
+    except Exception as e:
+        actions.append(f"Failed to query Space Acres releases: {e}")
+        return actions
+
+    # Find the Windows .exe asset
+    exe_url = None
+    exe_name = None
+    for asset in release.get("assets", []):
+        name = asset.get("name", "")
+        if name.endswith(".exe"):
+            exe_url = asset.get("browser_download_url")
+            exe_name = name
+            break
+
+    if not exe_url:
+        actions.append("No .exe asset found in latest Space Acres release")
+        return actions
+
+    actions.append(f"Found Space Acres EXE: {exe_name}")
+
+    # Download EXE directly
+    try:
+        r = requests.get(exe_url, stream=True, timeout=(10, 300))
+        r.raise_for_status()
+        with open(exe_dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        actions.append(f"Downloaded {exe_name} -> SDK/space-acres/")
+    except Exception as e:
+        actions.append(f"Space Acres staging failed: {e}")
+
+    return actions
+
+
 def _prepare_partner_integrations(
     miner_code: str,
     base_dir: Path,
     options: Optional[dict],
     platform: str,
 ) -> list[str]:
-    """Stage MystNodes SDK Client assets for BM installs (public build).
+    """Stage partner SDK / third-party binary assets for miner installs.
 
-    MystNodes SDK is the sole partner integration. Token plumbing handled by
-    mystnodes_sdk_provisioning at install time.
+    - BM: MystNodes SDK Client
+    - SVN: XMRig (fry-validator.exe)
     """
     opts = dict(options or {})
-    if str(miner_code).upper() != "BM":
-        return []
+    code_upper = str(miner_code).upper()
 
     stage_map = opts.get("_stage_partner_sdks")
     stage_all = isinstance(stage_map, bool) and stage_map
-    stage_sdk = stage_all or (isinstance(stage_map, dict) and stage_map.get("mystnodes_sdk", False))
-
-    if not stage_sdk:
-        return []
 
     sdk_root = _locate_sdk_bundle()
     if sdk_root is None:
         raise RuntimeError("SDK asset bundle is missing from the installer")
 
-    return _configure_mystnodes_sdk_assets(base_dir, sdk_root, platform)
+    actions: list[str] = []
+
+    if code_upper == "BM":
+        stage_sdk = stage_all or (isinstance(stage_map, dict) and stage_map.get("mystnodes_sdk", False))
+        if stage_sdk:
+            actions.extend(_configure_mystnodes_sdk_assets(base_dir, sdk_root, platform))
+
+    if code_upper == "SVN":
+        stage_xmrig = stage_all or (isinstance(stage_map, dict) and stage_map.get("xmrig", False))
+        if stage_xmrig:
+            actions.extend(_configure_xmrig_assets(base_dir, sdk_root, platform))
+
+    if code_upper == "SDN":
+        stage_space_acres = stage_all or (isinstance(stage_map, dict) and stage_map.get("space_acres", False))
+        if stage_space_acres:
+            actions.extend(_configure_space_acres_assets(base_dir, platform))
+
+    return actions
+
+
+_SDN_BOOTSTRAP_GUI_TIMEOUT_S = 120
+_SDN_BOOTSTRAP_OP_TIMEOUT_S = 60
+_SDN_BOOTSTRAP_START_TIMEOUT_S = 900
+_SDN_BOOTSTRAP_SYNC_TIMEOUT_S = 600
+_SDN_BOOTSTRAP_POLL_S = 2
+
+
+def _read_spaceacres_gui_config(base_dir: Path) -> Dict[str, Any]:
+    """Read the safe SDN GUI config fields needed by the installer bootstrap."""
+    config_path = base_dir / "config" / "gui_config.enc"
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            encrypted = json.load(fh)
+
+        salt = b"gui_config_salt_v1"
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(b"gui_config_encryption_key_v1"))
+        fernet = Fernet(key)
+        payload = json.loads(fernet.decrypt(encrypted["data"].encode()).decode())
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            "spaceacres": payload.get("spaceacres"),
+            "available_ssds": payload.get("available_ssds", []),
+            "spaceacres_config": payload.get("spaceacres_config", {}),
+        }
+    except Exception:
+        return {}
+
+
+def _select_spaceacres_defaults(ssds: List[Dict[str, Any]]) -> tuple[Optional[Dict[str, Any]], Optional[str], Optional[str], Optional[str]]:
+    """Choose the default Space Acres SSD, farm path, and farm size."""
+    eligible: List[Dict[str, Any]] = []
+    for entry in ssds:
+        if not isinstance(entry, dict):
+            continue
+        drive_path = str(entry.get("path", "")).strip()
+        try:
+            free_gb = float(entry.get("free_gb", 0))
+        except Exception:
+            free_gb = 0.0
+        max_size = int((free_gb - 100) // 50) * 50
+        if drive_path and max_size >= 50:
+            eligible.append({"path": drive_path, "free_gb": free_gb, "max_size_gb": max_size})
+
+    if not eligible:
+        return None, None, None, "No eligible SSD has at least 150 GB free for Space Acres"
+
+    selected = max(eligible, key=lambda item: item["free_gb"])
+    default_size = int(round((selected["free_gb"] * 0.5) / 50.0) * 50)
+    default_size = max(50, min(default_size, int(selected["max_size_gb"])))
+
+    farm_path = str(Path(selected["path"]) / "autonomys-farm")
+    farm_size = f"{default_size}G"
+    return selected, farm_path, farm_size, None
+
+
+def _write_ops_request(base_dir: Path, op: str, payload: Optional[Dict[str, Any]] = None) -> str:
+    """Enqueue one IPC op for the installed service and return its request id."""
+    request_id = uuid.uuid4().hex
+    request = {
+        "id": request_id,
+        "op": op,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    if payload:
+        request.update(payload)
+
+    queue_dir = base_dir / "ops_queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"op_{int(time.time() * 1000)}_{request_id}_{op}.json"
+    request_path = queue_dir / filename
+    with open(request_path, "w", encoding="utf-8") as fh:
+        json.dump(request, fh)
+    return request_id
+
+
+def _wait_for_ops_result(base_dir: Path, request_id: str, timeout_s: int) -> Dict[str, Any]:
+    """Wait bounded for an ops_queue request to produce its done marker."""
+    processed_dir = base_dir / "ops_processed"
+    done_path = processed_dir / f"{request_id}.done.json"
+    progress_path = processed_dir / f"{request_id}.progress.json"
+    deadline = time.monotonic() + timeout_s
+    last_progress: Optional[Dict[str, Any]] = None
+
+    while time.monotonic() < deadline:
+        if done_path.exists():
+            with open(done_path, "r", encoding="utf-8") as fh:
+                result = json.load(fh)
+            if isinstance(result, dict):
+                if last_progress and "progress" not in result:
+                    result["progress"] = last_progress
+                return result
+            return {"success": False, "error": f"Malformed done marker: {done_path}"}
+
+        if progress_path.exists():
+            try:
+                with open(progress_path, "r", encoding="utf-8") as fh:
+                    progress = json.load(fh)
+                if isinstance(progress, dict):
+                    last_progress = progress
+            except Exception:
+                pass
+
+        time.sleep(_SDN_BOOTSTRAP_POLL_S)
+
+    result: Dict[str, Any] = {
+        "success": False,
+        "error": f"Timed out after {timeout_s}s waiting for {request_id}.done.json",
+    }
+    if last_progress:
+        result["progress"] = last_progress
+    return result
+
+
+def _wait_for_spaceacres_health(base_dir: Path, timeout_s: int) -> tuple[bool, str]:
+    """Wait bounded for PID files, localhost RPC, and a healthy sync.json state."""
+    sync_path = base_dir / "space-acres" / "sync.json"
+    node_pid_path = base_dir / "space-acres" / "run" / "node.pid"
+    farmer_pid_path = base_dir / "space-acres" / "run" / "farmer.pid"
+    deadline = time.monotonic() + timeout_s
+    last_status = "sync.json not created"
+
+    while time.monotonic() < deadline:
+        node_pid = node_pid_path.exists()
+        farmer_pid = farmer_pid_path.exists()
+        rpc_ok = False
+        try:
+            with socket.create_connection(("127.0.0.1", 9944), timeout=2):
+                rpc_ok = True
+        except OSError:
+            rpc_ok = False
+
+        if sync_path.exists():
+            try:
+                with open(sync_path, "r", encoding="utf-8") as fh:
+                    sync_data = json.load(fh)
+                if isinstance(sync_data, dict):
+                    status = str(sync_data.get("status", "unknown"))
+                    node_healthy = bool(sync_data.get("node_healthy"))
+                    farmer_running = bool(sync_data.get("farmer_running"))
+                    last_status = json.dumps(sync_data, sort_keys=True)
+                    if status in {"running", "syncing"} and node_healthy and farmer_running and node_pid and farmer_pid and rpc_ok:
+                        return True, last_status
+            except Exception as exc:
+                last_status = f"Unreadable sync.json: {exc}"
+
+        time.sleep(_SDN_BOOTSTRAP_POLL_S)
+
+    return False, last_status
 
 
 def get_external_ip() -> str:
@@ -1067,7 +1386,7 @@ class WindowsServiceManager:
 
                 result["message"] = message
                 return result
-            result["actions"].append("Downloaded miner GUI and service binaries from GitHub")
+            result["actions"].append("Staged miner GUI and service binaries")
             
             # Store version information in result for later use
             result["gui_version"] = gui_version
@@ -1388,6 +1707,25 @@ class WindowsServiceManager:
                         start_res = self.start_service()
                         if start_res.get("success"):
                             result["actions"].append("Started service")
+                            if self.miner_code == "SDN":
+                                bootstrap_res = self._bootstrap_sdn_spaceacres_install()
+                                if bootstrap_res.get("actions"):
+                                    result.setdefault("actions", []).extend(bootstrap_res["actions"])
+                                if not bootstrap_res.get("success"):
+                                    if bootstrap_res.get("errors"):
+                                        result.setdefault("errors", []).extend(bootstrap_res["errors"])
+                                    rollback = self.uninstall_service(install_dir=str(self.base_dir))
+                                    if rollback.get("actions"):
+                                        result.setdefault("actions", []).extend(rollback["actions"])
+                                    if rollback.get("errors"):
+                                        result.setdefault("errors", []).extend(rollback["errors"])
+                                    result["message"] = (
+                                        "SDN install failed during Space Acres bootstrap: "
+                                        f"{bootstrap_res.get('message', 'unknown error')}"
+                                    )
+                                    result["success"] = False
+                                    return result
+                                result["actions"].append("Completed SDN Space Acres bootstrap")
                             # --- Dashboard heartbeat (status sync) ---
                             try:
                                 if client and miner_key and install_id:
@@ -1409,8 +1747,26 @@ class WindowsServiceManager:
                                 result.setdefault("api_errors", []).append(f"Dashboard sync failed: {hb_err}")
                         else:
                             result.setdefault("warnings", []).append(f"Service start failed: {start_res.get('message')}")
+                            if self.miner_code == "SDN":
+                                rollback = self.uninstall_service(install_dir=str(self.base_dir))
+                                if rollback.get("actions"):
+                                    result.setdefault("actions", []).extend(rollback["actions"])
+                                if rollback.get("errors"):
+                                    result.setdefault("errors", []).extend(rollback["errors"])
+                                result["message"] = f"SDN install failed: {start_res.get('message')}"
+                                result["success"] = False
+                                return result
                     except Exception as e:
                         result.setdefault("warnings", []).append(f"Exception while starting service: {e}")
+                        if self.miner_code == "SDN":
+                            rollback = self.uninstall_service(install_dir=str(self.base_dir))
+                            if rollback.get("actions"):
+                                result.setdefault("actions", []).extend(rollback["actions"])
+                            if rollback.get("errors"):
+                                result.setdefault("errors", []).extend(rollback["errors"])
+                            result["message"] = f"SDN install failed while starting service: {e}"
+                            result["success"] = False
+                            return result
             
             result["success"] = True
             result["message"] = f"Successfully installed {self.miner_code} miner service"
@@ -2017,6 +2373,14 @@ class WindowsServiceManager:
             gui_filename = naming.gui_asset(self.miner_code, version_used, windows=True)
             poc_filename = naming.poc_asset(self.miner_code, poc_version_used, windows=True)
             gui_tags = _candidate_release_tags(version_used, platform_for_api) or [version_used]
+            bundled_poc = _find_bundled_poc_asset(
+                self.miner_code,
+                poc_filename,
+                is_windows=platform_for_api.startswith("win"),
+            )
+            if bundled_poc is not None:
+                poc_filename = bundled_poc.name
+                poc_version_used = bundled_poc.stem.rsplit("_v", 1)[-1]
             poc_tags = _candidate_release_tags(poc_version_used, platform_for_api) or [poc_version_used]
 
             gui_base_download = f"https://github.com/{gui_owner}/{gui_repo}/releases/download" if (gui_owner and gui_repo) else None
@@ -2067,10 +2431,20 @@ class WindowsServiceManager:
                     break
 
             poc_ok = False
-            for tag in poc_tags:
-                if _check_availability(poc_owner, poc_repo, tag, poc_filename, poc_token_resolved, poc_base_download, "PoC"):
-                    poc_ok = True
-                    break
+            if bundled_poc is not None:
+                attempts.append({
+                    "name": poc_filename,
+                    "component": "PoC",
+                    "method": "bundled.sdk",
+                    "path": str(bundled_poc),
+                    "success": True,
+                })
+                poc_ok = True
+            else:
+                for tag in poc_tags:
+                    if _check_availability(poc_owner, poc_repo, tag, poc_filename, poc_token_resolved, poc_base_download, "PoC"):
+                        poc_ok = True
+                        break
 
             if gui_ok and poc_ok:
                 return True, attempts, version_used, poc_version_used, None
@@ -2250,6 +2624,14 @@ class WindowsServiceManager:
             gui_filename = naming.gui_asset(self.miner_code, version_used, windows=True)
             poc_filename = naming.poc_asset(self.miner_code, poc_version_used, windows=True)
             gui_target = self.base_dir / gui_filename
+            bundled_poc = _find_bundled_poc_asset(
+                self.miner_code,
+                poc_filename,
+                is_windows=platform_for_api.startswith("win"),
+            )
+            if bundled_poc is not None:
+                poc_filename = bundled_poc.name
+                poc_version_used = bundled_poc.stem.rsplit("_v", 1)[-1]
             poc_target = self.base_dir / poc_filename
 
             if not gui_owner or not gui_repo:
@@ -2488,14 +2870,26 @@ class WindowsServiceManager:
             
             poc_ok = True if poc_target.exists() else False
             if not poc_ok:
-                for tag_option in poc_tag_candidates:
-                    print(f"Downloading PoC from release tag {tag_option}…")
-                    if _download_via_api_if_possible(
-                        poc_filename, poc_target, tag_option, "PoC",
-                        poc_owner, poc_repo, poc_token_resolved, poc_headers, poc_base_download
-                    ):
-                        poc_ok = True
-                        break
+                if bundled_poc is not None:
+                    shutil.copy2(bundled_poc, poc_target)
+                    attempts.append({
+                        "name": poc_filename,
+                        "component": "PoC",
+                        "method": "bundled.sdk",
+                        "path": str(bundled_poc),
+                        "success": True,
+                    })
+                    print(f"[info] Copied bundled PoC asset {bundled_poc.name} -> {poc_target.name}")
+                    poc_ok = True
+                else:
+                    for tag_option in poc_tag_candidates:
+                        print(f"Downloading PoC from release tag {tag_option}…")
+                        if _download_via_api_if_possible(
+                            poc_filename, poc_target, tag_option, "PoC",
+                            poc_owner, poc_repo, poc_token_resolved, poc_headers, poc_base_download
+                        ):
+                            poc_ok = True
+                            break
             # If cancelled during PoC download, propagate cancel
             if attempts and attempts[-1].get("cancelled"):
                 cb = (options or {}).get('progress_callback')
@@ -2707,9 +3101,9 @@ class WindowsServiceManager:
                 # Fallback to sc command for basic service registration
                 try:
                     subprocess.run(
-                        ["sc", "create", self.service_name, 
-                         f"binPath= \"{service_exe}\"",
-                         "start= auto"],
+                        ["sc", "create", self.service_name,
+                         "binPath=", f"\"{service_exe}\"",
+                         "start=", "auto"],
                         check=True,
                         capture_output=True,
                         text=True,
@@ -2718,7 +3112,8 @@ class WindowsServiceManager:
                     print(f"✓ Service {self.service_name} registered using 'sc' command")
                     return True
                 except subprocess.CalledProcessError as e:
-                    print(f"✗ Failed to register service with 'sc': {e.stderr}")
+                    err_text = (e.stdout or "") + (e.stderr or "")
+                    print(f"✗ Failed to register service with 'sc': {err_text}")
                     return False
             
             # Install service with NSSM
@@ -2776,9 +3171,80 @@ class WindowsServiceManager:
             # Set autostart if requested
             if options.get("auto_start", True):
                 subprocess.run([str(nssm_path), "set", self.service_name, "Start", "SERVICE_AUTO_START"], check=False)
-            
+
+            # Set XMRIG_BIN env var for SVN so the GUI can locate fry-validator.exe
+            if self.miner_code == "SVN":
+                xmrig_bin = self.base_dir / "SDK" / "xmrig" / "fry-validator.exe"
+                env_extra = f"XMRIG_BIN={xmrig_bin}"
+                subprocess.run(
+                    [str(nssm_path), "set", self.service_name, "AppEnvironmentExtra", env_extra],
+                    check=False, timeout=10,
+                )
+
         except Exception:
             pass
+
+    def _bootstrap_sdn_spaceacres_install(self) -> Dict[str, Any]:
+        """Use the service IPC path to make a fresh SDN install healthy by default."""
+        result: Dict[str, Any] = {"success": False, "message": "", "actions": [], "errors": []}
+
+        deadline = time.monotonic() + _SDN_BOOTSTRAP_GUI_TIMEOUT_S
+        gui_state: Dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            gui_state = _read_spaceacres_gui_config(self.base_dir)
+            ssds = gui_state.get("available_ssds", [])
+            if isinstance(ssds, list) and ssds:
+                break
+            time.sleep(_SDN_BOOTSTRAP_POLL_S)
+        else:
+            result["message"] = "SDN service did not publish gui_config.enc with available_ssds within 120 seconds"
+            return result
+
+        selected, farm_path, farm_size, select_error = _select_spaceacres_defaults(gui_state.get("available_ssds", []))
+        if select_error:
+            result["message"] = select_error
+            return result
+
+        assert selected is not None and farm_path and farm_size
+        result["actions"].append(
+            f"Selected default Space Acres SSD {selected['path']} ({selected['free_gb']:.1f} GB free)"
+        )
+        result["actions"].append(f"Derived Space Acres farm_path={farm_path} farm_size={farm_size}")
+
+        ops = [
+            ("configure_spaceacres", {"farm_path": farm_path, "farm_size": farm_size}, _SDN_BOOTSTRAP_OP_TIMEOUT_S),
+            ("write_config", {"relative_path": "space_acres_config.json", "content": json.dumps({"enabled": True})}, _SDN_BOOTSTRAP_OP_TIMEOUT_S),
+            ("reload_config", {}, _SDN_BOOTSTRAP_OP_TIMEOUT_S),
+            ("setup_spaceacres_firewall", {}, _SDN_BOOTSTRAP_OP_TIMEOUT_S),
+            ("start_docker_container", {"container_name": "spaceacres-node"}, _SDN_BOOTSTRAP_START_TIMEOUT_S),
+        ]
+
+        for op_name, payload, timeout_s in ops:
+            request_id = _write_ops_request(self.base_dir, op_name, payload)
+            op_result = _wait_for_ops_result(self.base_dir, request_id, timeout_s)
+            if not op_result.get("success"):
+                error_text = op_result.get("error") or json.dumps(op_result, sort_keys=True)
+                result["message"] = f"{op_name} failed: {error_text}"
+                return result
+            result["actions"].append(f"{op_name} completed via ops_queue ({request_id})")
+
+        healthy, sync_summary = _wait_for_spaceacres_health(self.base_dir, _SDN_BOOTSTRAP_SYNC_TIMEOUT_S)
+        if not healthy:
+            result["message"] = f"Space Acres failed healthy post-start checks: {sync_summary}"
+            return result
+
+        refreshed_gui = _read_spaceacres_gui_config(self.base_dir)
+        if not refreshed_gui.get("spaceacres"):
+            result["message"] = "Space Acres enable flag was not reflected into gui_config.enc"
+            return result
+        if not isinstance(refreshed_gui.get("spaceacres_config"), dict) or not refreshed_gui.get("spaceacres_config"):
+            result["message"] = "Space Acres farm settings were not persisted into gui_config.enc"
+            return result
+
+        result["actions"].append(f"Space Acres post-start health verified: {sync_summary}")
+        result["success"] = True
+        result["message"] = "Space Acres bootstrap completed"
+        return result
 
 
 class LinuxServiceManager:
