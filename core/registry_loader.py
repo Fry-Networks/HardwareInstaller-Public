@@ -32,7 +32,7 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _REGISTRY_URL = (
-    "https://raw.githubusercontent.com/Fry-Foundation/"
+    "https://raw.githubusercontent.com/Fry-Networks/"
     "HardwareInstaller-Public/main/core/miner_registry.json"
 )
 
