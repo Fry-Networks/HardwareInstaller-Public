@@ -42,11 +42,11 @@ DEFAULT_MANIFEST_URL = (
 DEFAULT_LOG_PATH = Path(r"C:\ProgramData\FryNetworks\updater\updater.log")
 DEFAULT_TASK_NAME = "FryNetworksUpdater"
 DEFAULT_EMBEDDED_TOKEN = os.getenv("EMBEDDED_GITHUB_TOKEN", "")
-DEFAULT_POC_REPO = "Fry-Foundation/HardwarePoC_releases"
+DEFAULT_POC_REPO = "Fry-Networks/HardwarePoC_releases"
 DEFAULT_POC_CONFIG_DIR = r"C:\ProgramData\FryNetworks"
 
 # Kept for backward compat (PoC updates still use GitHub)
-DEFAULT_REPO = "Fry-Foundation/HardwareInstaller-Public"
+DEFAULT_REPO = "Fry-Networks/HardwareInstaller-Public"
 
 MANIFEST_REQUIRED_FIELDS = ("version", "sha256", "download_url")
 

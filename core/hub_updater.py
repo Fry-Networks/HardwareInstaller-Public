@@ -28,7 +28,7 @@ _logger = logging.getLogger(__name__)
 # Manifest constants
 # ---------------------------------------------------------------------------
 _HUB_MANIFEST_URL = (
-    "https://raw.githubusercontent.com/Fry-Foundation/"
+    "https://raw.githubusercontent.com/Fry-Networks/"
     "HardwareInstaller-Public/main/fryhub_version.json"
 )
 _HUB_MANIFEST_REQUIRED = ("manifest_version", "hub_version", "setup_url", "setup_sha256")
@@ -471,7 +471,7 @@ def _threaded_download_and_launch(
 # PoC binary update functions (ported from tools/updater.py)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_POC_REPO = "Fry-Foundation/HardwarePoC_releases"
+_DEFAULT_POC_REPO = "Fry-Networks/HardwarePoC_releases"
 _DEFAULT_POC_CONFIG_DIR = Path(r"C:\ProgramData\FryNetworks")
 _POC_LOG_PATH = Path(r"C:\ProgramData\FryNetworks\updater\fryhub_updater.log")
 
