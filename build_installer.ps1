@@ -314,7 +314,7 @@ try {
         $ManifestPath = Join-Path $InstallerDir "fryhub_version.json"
         if (Test-Path $ManifestPath) {
             $ExeHash = (Get-FileHash "dist\$ExeName.exe" -Algorithm SHA256).Hash
-            $DownloadUrl = "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases/download/v$Version/FryHubSetup-$Version.exe"
+            $DownloadUrl = "https://github.com/Fry-Networks/HardwareInstaller-Public/releases/download/v$Version/FryHubSetup-$Version.exe"
             $ManifestObj = Get-Content $ManifestPath -Raw | ConvertFrom-Json
             $ManifestObj.hub_version = $Version
             $ManifestObj.setup_sha256 = $ExeHash
