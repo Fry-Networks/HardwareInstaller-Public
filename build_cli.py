@@ -363,7 +363,7 @@ def _upload_github_release(
     sha = hashlib.sha256(exe_path.read_bytes()).hexdigest().upper()
     tag = f"v{version}"
     download_url = (
-        "https://github.com/Fry-Foundation/HardwareInstaller-Public/"
+        "https://github.com/Fry-Networks/HardwareInstaller-Public/"
         f"releases/download/{tag}/FryHubSetup-{version}.exe"
     )
 

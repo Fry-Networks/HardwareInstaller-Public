@@ -393,7 +393,7 @@ def _self_downgrade_check():
         f"A newer version (v{installed}) is already installed.\n"
         "Please use your currently installed version or download\n"
         "the latest release from:\n"
-        "https://github.com/Fry-Foundation/HardwareInstaller-Public/releases"
+        "https://github.com/Fry-Networks/HardwareInstaller-Public/releases"
     )
     msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
     msg.exec()
