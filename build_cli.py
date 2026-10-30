@@ -373,10 +373,34 @@ def _upload_github_release(
         "setup_url": download_url,
         "setup_sha256": sha,
     }
-    if min_required:
-        manifest["min_required"] = min_required
-
     manifest_path = Path(__file__).parent / "fryhub_version.json"
+
+    # Force-update floor. A release cut that omits --min-required must not
+    # silently drop the previous manifest's floor, so carry it forward; if
+    # there is nothing to carry, say so loudly rather than publish a manifest
+    # with no force-update threshold at all.
+    effective_min_required = min_required
+    if not effective_min_required:
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            previous = {}
+        if isinstance(previous, dict):
+            effective_min_required = previous.get("min_required")
+        if effective_min_required:
+            print(
+                "[GitHub] --min-required not given; carrying forward "
+                f"min_required={effective_min_required} from {manifest_path}"
+            )
+    if effective_min_required:
+        manifest["min_required"] = effective_min_required
+    else:
+        print(
+            "[GitHub] WARNING: no min_required in manifest — clients will "
+            "not force-update. Pass --min-required to set a floor.",
+            file=sys.stderr,
+        )
+
     manifest_path.write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
